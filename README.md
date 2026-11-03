@@ -35,6 +35,23 @@ python scripts/check_db.py
 
 검사는 연결 시간 제한을 적용한 읽기 전용 `SELECT 1`만 수행합니다. 접속 문자열과 비밀번호는 로그에 출력하지 않습니다.
 
+## 원본 수집
+
+선정 데이터와 질문은 `docs/DATASET_SELECTION.md`에 기록되어 있습니다. 키 없이 확인할 수 있는 수지구 생활체육 프로그램 페이지는 다음처럼 원본 HTML과 메타데이터를 저장합니다.
+
+```powershell
+python scripts/collect_raw.py suji_programs
+```
+
+`DATA_GO_KR_SERVICE_KEY` 설정 후 공공시설·도시공원 API 원본을 수집할 수 있습니다.
+
+```powershell
+python scripts/collect_raw.py public_facilities
+python scripts/collect_raw.py city_parks
+```
+
+원본은 `data/raw/<dataset_id>/`에 저장되며 Git에는 포함되지 않습니다. 각 원본에는 수집시각, 출처 URL, HTTP 상태, 크기, SHA-256을 기록한 메타데이터가 따라갑니다.
+
 ## 검증
 
 ```powershell

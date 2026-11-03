@@ -1,4 +1,6 @@
-from yongin_data.config import Settings
+import logging
+
+from yongin_data.config import Settings, configure_logging
 
 
 def test_settings_accept_missing_optional_secrets() -> None:
@@ -14,3 +16,9 @@ def test_settings_reject_non_postgresql_url() -> None:
         assert "PostgreSQL" in str(exc)
     else:
         raise AssertionError("non-PostgreSQL URL should be rejected")
+
+
+def test_http_client_request_logging_is_suppressed() -> None:
+    configure_logging()
+    assert logging.getLogger("httpx").level >= logging.WARNING
+    assert logging.getLogger("httpcore").level >= logging.WARNING

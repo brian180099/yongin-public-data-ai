@@ -60,3 +60,7 @@ def configure_logging(level: int = logging.INFO) -> None:
         level=level,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    # httpx INFO logs include query strings. Public-data service keys are
+    # query parameters, so request-level logs must remain disabled.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
