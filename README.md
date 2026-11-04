@@ -2,8 +2,10 @@
 
 용인시 생활여가·문화·체육 공공데이터를 수집·정제·갱신하고, 자연어 질문에 실제 조회·결합·계산 결과와 출처를 제공하기 위한 2~3일 MVP 프로젝트입니다. 계산은 SQL·Python이 담당하고 LLM은 추후 질문 해석과 결과 설명에 연결합니다.
 
-현재 단계는 실행 가능한 초기 골격입니다. PostgreSQL 연결 경로는 검증했지만,
-실제 공공데이터 3종의 수집·정제·적재와 검색·분석 기능은 아직 연결되지 않았습니다.
+현재 기흥구 행사 `giheung_events` 1종의 실제 데이터가 운영 DB에 적재되어 있습니다.
+이 저장소의 Streamlit 화면은 기존 질문 서비스 `http://localhost:8090/ask`를
+호출합니다. 이 서비스가 기존 n8n `YNGN02AnalysisV1` Webhook과 Supabase
+`analytics` 뷰를 거칩니다. 수집 워크플로는 별도 저장소가 관리합니다.
 
 ## 로컬 실행
 
@@ -19,11 +21,18 @@ Copy-Item .env.example .env
 
 검증한 버전을 그대로 재현하려면 `python -m pip install -r requirements.lock`을 먼저 실행한 뒤 `python -m pip install -e . --no-deps`를 실행합니다.
 
-`.env`에는 필요한 값만 입력합니다. 키가 없어도 초기 화면과 테스트는 실행됩니다. 비밀정보가 든 `.env`는 커밋하지 않습니다.
+`.env`에는 필요한 값만 입력합니다. Streamlit 질문 화면은 DB 키 없이 실행됩니다.
+기존 로컬 분석 서비스가 실행 중이면 `ANALYSIS_SERVICE_URL`은 설정하지 않아도 됩니다.
+비밀정보가 든 `.env`는 커밋하지 않습니다.
 
 ```powershell
 streamlit run app.py
 ```
+
+질문 화면은 기본적으로 `http://localhost:8501`에서 열립니다. 현재 기존 질문 화면은
+`http://localhost:8090/`이며, 두 화면 모두 같은 `/ask` 분석 경로를 사용합니다.
+지원 질문은 기흥구 행사 전체·2024년·2024년 월별 건수입니다. 시설 검색과 다른 구 비교는
+아직 지원하지 않습니다. 운영 데이터의 조회는 미리 정의한 파라미터 SQL로 수행합니다.
 
 ## DB 연결 확인
 
@@ -61,7 +70,7 @@ pytest
 
 ## 디렉터리
 
-- `src/yongin_data/`: 설정, DB, 수집, 분석 코드
+- `src/yongin_data/`: 설정, DB, 수집, 질문 서비스 클라이언트
 - `data/raw/`: 수집한 원본(내용은 Git 제외)
 - `data/processed/`: 정제 결과(내용은 Git 제외)
 - `sql/`: 검증된 SQL
