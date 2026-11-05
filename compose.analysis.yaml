@@ -1,0 +1,36 @@
+name: yongin-question-agent
+
+services:
+  yongin-question-agent:
+    image: yongin-question-agent:local
+    build:
+      context: .
+      dockerfile: Dockerfile.analysis
+    container_name: yongin-question-agent
+    restart: unless-stopped
+    env_file:
+      - ./.runtime/analysis-container.env
+    environment:
+      TZ: Asia/Seoul
+    ports:
+      - "127.0.0.1:8091:8091"
+    networks:
+      - n8n_default
+  yongin-question-web:
+    image: yongin-question-agent:local
+    container_name: yongin-question-web
+    restart: unless-stopped
+    env_file:
+      - ./.runtime/analysis-container.env
+    environment:
+      TZ: Asia/Seoul
+      YONGIN_ANALYSIS_WEBHOOK_URL: http://n8n:5678/webhook/yongin-analysis-v1
+    command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    ports:
+      - "127.0.0.1:8501:8501"
+    networks:
+      - n8n_default
+
+networks:
+  n8n_default:
+    external: true

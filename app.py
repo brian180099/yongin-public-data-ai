@@ -1,77 +1,58 @@
-"""Streamlit question screen for the verified Yongin analysis workflow."""
+"""Streamlit chat for the single Yongin analysis engine."""
+
+import os
 
 import pandas as pd
+import requests
 import streamlit as st
 
-from yongin_data.analysis.client import AnalysisServiceError, ask_question
-from yongin_data.config import configure_logging
+from yongin_data.config import get_settings
 
 
-configure_logging()
-st.set_page_config(page_title="용인 생활여가 데이터 질문", page_icon="📍", layout="wide")
-st.title("용인 생활여가 공공데이터 질문")
-st.caption("운영 DB에 적재된 기흥구 행사 데이터의 시작일 기준 건수를 조회합니다.")
-st.info("현재 조회 가능: 기흥구 행사 건수와 연도별·월별 건수. 시설과 다른 구의 자료는 아직 적재되지 않았습니다.")
+st.set_page_config(page_title="용인 공공데이터 질문", layout="wide")
+st.title("용인시 공공데이터 질문 분석")
+st.caption("검증된 적재 자료를 읽기 전용으로 조회합니다. 등록 현황은 실제 운영·예약 가능 상태를 뜻하지 않습니다.")
+st.info("OpenAI 키 설정됨 · 각 답변에서 실제 해석 방식을 확인하세요 (모델 호출 미검증)" if get_settings().openai_api_key else
+        "질문 해석: 제한된 규칙 기반 (OpenAI 키 미설정, 실제 모델 호출 미검증)")
 
-examples = [
-    "기흥구 행사 전체 몇 건이야?",
-    "기흥구 2024년 행사 몇 건이야?",
-    "기흥구 2024년 월별 행사 수를 보여줘",
-]
-example = st.selectbox("대표 질문", ["직접 입력", *examples])
-with st.form("question_form"):
-    question = st.text_input("질문", value="" if example == "직접 입력" else example,
-                             max_chars=300, placeholder=examples[0], key=f"question_{example}")
-    submitted = st.form_submit_button("질문하기")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "context" not in st.session_state:
+    st.session_state.context = None
 
-if submitted:
-    try:
-        with st.spinner("실제 데이터를 조회하고 있습니다…"):
-            data = ask_question(question)
-    except ValueError as exc:
-        st.warning(str(exc))
-    except AnalysisServiceError as exc:
-        st.error(str(exc))
-    else:
-        status = data["status"]
-        if status == "ok":
-            st.success(data["answer"])
-        elif status == "empty":
-            st.info(data["answer"])
-        elif status == "clarification":
-            st.warning(data["answer"])
-        elif status == "unsupported":
-            st.info(data["answer"])
-        else:
-            st.error(data["answer"])
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
+        if message.get("interpreter"):
+            st.caption("질문 해석: " + ("OpenAI 구조화 계획" if message["interpreter"] == "llm" else "규칙 기반"))
+        if message.get("result"):
+            st.dataframe(pd.DataFrame(message["result"]), hide_index=True, width="stretch")
+        for source in message.get("sources", []):
+            st.caption(f"{source['dataset_name']} · {source['provider']} · 기준일 {source['reference_date'] or '미확인'} · 수집일 {source['collected_at'] or '미확인'}")
+            if source.get("url"):
+                st.link_button("공식 포털", source["url"])
+        if message.get("calculation"):
+            st.caption(f"계산: {message['calculation']['measure']} / {message['calculation']['method']} · 조건: {message.get('filters', {})}")
 
-        if status in {"ok", "empty"}:
-            rows = data["result"][:12]
-            if rows:
-                st.subheader("조회 결과")
-                frame = pd.DataFrame(rows)
-                st.dataframe(frame, hide_index=True, width="stretch")
-                if data["visualization"] and data["visualization"].get("type") == "bar" and {"month", "count"}.issubset(frame.columns):
-                    st.subheader("월별 행사 수")
-                    st.bar_chart(frame.set_index("month")["count"], x_label="시작 월", y_label="행사 수")
-
-        calculation = data["calculation"]
-        if calculation:
-            st.subheader("계산 기준")
-            st.write(f"{calculation.get('measure', '확인하지 못함')} · {calculation.get('region', '확인하지 못함')} · 날짜 필드: {calculation.get('date_field', '확인하지 못함')}")
-            st.write(f"조건: 연도 {data['filters'].get('year') or '전체'}, 월 {data['filters'].get('month') or '전체'}")
-            st.caption(calculation.get("null_handling", ""))
-
-        if data["sources"]:
-            st.subheader("출처와 날짜")
-            for source in data["sources"]:
-                st.write(f"{source.get('dataset_name', '확인하지 못함')} · {source.get('provider', '확인하지 못함')} (ID: {source.get('dataset_id', '확인하지 못함')})")
-                st.write(f"원본 기준일: {source.get('reference_date') or '확인하지 못함'} · 수집일: {source.get('collected_at') or '확인하지 못함'} · 마지막 정상 갱신: {source.get('last_success_at') or '확인하지 못함'}")
-                if source.get("url"):
-                    st.link_button("공식 원본 보기", source["url"])
-
-        if data["limitations"]:
-            st.subheader("해석 한계")
-            for limitation in data["limitations"]:
-                st.write(f"- {limitation}")
-        st.caption(f"요청 ID: {data['request_id']} · 상태: {status} · 의도: {data['intent']}")
+if question := st.chat_input("예: 숲체험일정은 몇 건이야?", max_chars=300):
+    with st.spinner("읽기 전용 자료를 조회하고 있습니다"):
+        try:
+            response = requests.post(
+                os.getenv("YONGIN_ANALYSIS_WEBHOOK_URL", "http://n8n:5678/webhook/yongin-analysis-v1"),
+                json={"question": question, "context": st.session_state.context},
+                timeout=35,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or data.get("status") not in {"ok", "clarification", "unsupported", "error"}:
+                raise ValueError("Webhook 응답 형식 오류")
+        except (requests.RequestException, ValueError):
+            data = {"status": "error", "answer": "질문 전달 경로에 연결하지 못했습니다. n8n과 분석 서비스 상태를 확인해 주세요.",
+                    "result": [], "sources": [], "calculation": None, "filters": {}, "interpreter": "rules", "context": None}
+    st.session_state.messages.append({"role": "user", "content": question})
+    st.session_state.messages.append({"role": "assistant", "content": data["answer"],
+                                      "result": data["result"], "sources": data["sources"],
+                                      "calculation": data["calculation"], "filters": data["filters"],
+                                      "interpreter": data["interpreter"]})
+    st.session_state.context = data["context"] if data["status"] == "ok" and data["context"] else None
+    st.rerun()

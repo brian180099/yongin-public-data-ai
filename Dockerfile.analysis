@@ -1,0 +1,8 @@
+FROM python:3.13-slim
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY app.py ./app.py
+RUN pip install --no-cache-dir .
+EXPOSE 8091
+CMD ["uvicorn", "yongin_data.analysis.api:app", "--host", "0.0.0.0", "--port", "8091"]

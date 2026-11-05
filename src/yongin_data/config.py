@@ -45,6 +45,7 @@ class Settings(BaseModel):
 def get_settings() -> Settings:
     """Load local .env values without overriding process environment values."""
 
+    load_dotenv(PROJECT_ROOT / ".runtime" / "analysis.env", override=False)
     load_dotenv(PROJECT_ROOT / ".env", override=False)
     return Settings(
         database_url=os.getenv("DATABASE_URL"),
