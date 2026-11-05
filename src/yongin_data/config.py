@@ -21,6 +21,7 @@ class Settings(BaseModel):
 
     database_url: str | None = None
     openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
     data_go_kr_service_key: str | None = None
 
     @field_validator("database_url")
@@ -50,6 +51,7 @@ def get_settings() -> Settings:
     return Settings(
         database_url=os.getenv("DATABASE_URL"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        openai_model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
         data_go_kr_service_key=os.getenv("DATA_GO_KR_SERVICE_KEY"),
     )
 

@@ -32,7 +32,8 @@ def _compact(value: str) -> str:
 def _blank(status: str = "unsupported", answer: str = "") -> dict[str, Any]:
     return {"request_id": uuid.uuid4().hex, "status": status, "intent": "unknown", "answer": answer,
             "filters": {}, "result": [], "visualization": None, "sources": [],
-            "calculation": None, "limitations": [], "interpreter": "rules", "context": None}
+            "calculation": None, "limitations": [], "interpreter": "rules", "context": None,
+            "model_status": "not_used"}
 
 
 def _catalog(cur) -> list[dict]:
@@ -47,7 +48,20 @@ def _catalog(cur) -> list[dict]:
 
 
 def _choose(question: str, catalog: list[dict], context: dict | None) -> tuple[dict | None, list[dict]]:
+    if context and context.get("pending_question") == question:
+        chosen = next((r for r in catalog if r["dataset_id"] == context.get("selection_id")), None)
+        if chosen:
+            return chosen, []
     compact = _compact(question)
+    if FOLLOWUP.search(question) and context and context.get("dataset_id"):
+        explicit = next((r for r in catalog if r["dataset_id"].lower() in question.lower() or
+                         (len(_compact(r["display_name"].split(" / ")[-1])) >= 5 and
+                          _compact(r["display_name"].split(" / ")[-1]) in compact)), None)
+        if explicit:
+            return explicit, []
+        previous = next((r for r in catalog if r["dataset_id"] == context["dataset_id"]), None)
+        if previous:
+            return previous, []
     matches = []
     for row in catalog:
         title = row["display_name"].split(" / ")[-1]
@@ -65,8 +79,6 @@ def _choose(question: str, catalog: list[dict], context: dict | None) -> tuple[d
         top = max(x[0] for x in matches)
         tied = [row for score, row in matches if score == top]
         return (tied[0], []) if len(tied) == 1 else (None, tied[:5])
-    if FOLLOWUP.search(question) and context:
-        return next((r for r in catalog if r["dataset_id"] == context.get("dataset_id")), None), []
     return None, []
 
 
@@ -85,6 +97,16 @@ def _basic_count(question: str, selected: dict) -> bool:
         r"(은|는|이|가|의)?(전체|총|적재)?"
         r"(몇건이야|몇건인가요|몇건있어|몇건|건수|총건수|몇개야|몇개|count)"
         r"(알려줘|보여줘)?", remainder))
+
+
+def _safe_context(context: dict | None) -> dict | None:
+    if not isinstance(context, dict):
+        return None
+    allowed = {"dataset_id", "keyword", "year", "month", "date_field",
+               "filter_field", "filter_value", "selection_id", "pending_question"}
+    clean = {k: v for k, v in context.items() if k in allowed and
+             (v is None or isinstance(v, int) or isinstance(v, str) and len(v) <= 300)}
+    return clean or None
 
 
 def _columns(cur, dataset_id: str) -> dict[str, dict]:
@@ -146,8 +168,12 @@ def _rule_plan(question: str, selected: dict, columns: dict, context: dict | Non
     filter_field = next((k for k in group_fields if district and district in columns[k]["values"]), None)
     filter_value = district
     if not filter_field:
+        condition_text = question.replace(quoted.group(0), "") if quoted else question
+        for title_part in re.findall(r"[가-힣A-Za-z0-9]+", selected.get("display_name", "")):
+            if len(title_part) > 1:
+                condition_text = condition_text.replace(title_part, "")
         found = [(len(value), key, value) for key in group_fields for value in columns[key]["values"]
-                 if len(value) >= 2 and _compact(value) in _compact(question)]
+                 if len(value) >= 2 and _compact(value) in _compact(condition_text)]
         if found:
             _, filter_field, filter_value = max(found)
     group_field = next((k for k in group_fields if any(x in question for x in (k, "구별" if "구" in k else "분류별"))), None)
@@ -166,12 +192,66 @@ def _rule_plan(question: str, selected: dict, columns: dict, context: dict | Non
             "filter_field": filter_field, "filter_value": filter_value, "group_field": group_field}
 
 
-def _llm_plan(question: str, catalog: list[dict], selected: dict | None, columns: dict,
-              context: dict | None, api_key: str) -> dict:
+def _inherit_verified_context(plan: dict, question: str, selected: dict,
+                              columns: dict, context: dict | None) -> dict:
+    """Carry filters only for an explicit follow-up on the same verified source."""
+    if not context or not FOLLOWUP.search(question) or context.get("dataset_id") != selected["dataset_id"]:
+        return plan
+    plan = plan.copy()
+    for key in ("keyword", "year", "month"):
+        if plan.get(key) is None and context.get(key) is not None:
+            plan[key] = context[key]
+    field, value = context.get("filter_field"), context.get("filter_value")
+    if (not plan.get("filter_field") and field in columns and columns[field]["kind"] == "group"
+            and value in columns[field]["values"]):
+        plan["filter_field"], plan["filter_value"] = field, value
+    date_field = context.get("date_field")
+    if (not plan.get("date_field") and date_field in columns and columns[date_field]["kind"] == "date"):
+        plan["date_field"] = date_field
+    return plan
+
+
+def _model_json(question: str, instructions: str, schema: dict, name: str, api_key: str) -> dict:
+    """Ask for data only; never accept executable SQL or a model-written answer."""
+    with httpx.Client(timeout=30) as client:
+        response = client.post("https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": get_settings().openai_model, "instructions": instructions,
+                  "input": question, "store": False, "max_output_tokens": 400,
+                  "text": {"format": {"type": "json_schema", "name": name,
+                                        "strict": True, "schema": schema}}})
+        response.raise_for_status()
+        body = response.json()
+    if body.get("status") != "completed":
+        raise ValueError("incomplete model response")
+    parts = [p["text"] for item in body.get("output", []) for p in item.get("content", [])
+             if p.get("type") == "output_text"]
+    if not parts:
+        raise ValueError("model returned no structured output")
+    return json.loads("".join(parts))
+
+
+def _llm_select(question: str, catalog: list[dict], context: dict | None,
+                api_key: str) -> dict:
     ids = [r["dataset_id"] for r in catalog]
-    names = list(columns)
+    schema = {"type": "object", "additionalProperties": False,
+              "properties": {"dataset_id": {"type": ["string", "null"], "enum": ids + [None]},
+                             "needs_clarification": {"type": "boolean"},
+                             "candidate_ids": {"type": "array", "items": {"type": "string", "enum": ids}}},
+              "required": ["dataset_id", "needs_clarification", "candidate_ids"]}
+    names = [(r["dataset_id"], r["display_name"]) for r in catalog]
+    instructions = ("용인 관련 자료를 고른다. 질문에 명시된 자료가 정확히 하나일 때만 ID를 선택한다. "
+                    "둘 이상 가능하거나 없는 자료이면 dataset_id=null, needs_clarification=true. "
+                    "모호한 경우 실제로 관련 있는 후보 ID를 최대 5개 candidate_ids에 적는다. "
+                    "기존 문맥은 '그중에서' 같은 명시적 후속 질문에만 사용한다. "
+                    f"허용 자료 목록: {names}. 직전 자료 ID: {(context or {}).get('dataset_id')}.")
+    return _model_json(question, instructions, schema, "dataset_selection", api_key)
+
+
+def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
+              context: dict | None, api_key: str) -> dict:
     schema = {"type": "object", "additionalProperties": False, "properties": {
-        "dataset_id": {"type": "string", "enum": ids},
+        "dataset_id": {"type": "string", "enum": [selected["dataset_id"]]},
         "operation": {"type": "string", "enum": ["count", "records", "monthly", "yearly", "group", "unsupported"]},
         "keyword": {"type": ["string", "null"]}, "year": {"type": ["integer", "null"]},
         "month": {"type": ["integer", "null"]},
@@ -180,24 +260,16 @@ def _llm_plan(question: str, catalog: list[dict], selected: dict | None, columns
         "group_field": {"type": ["string", "null"]}},
         "required": ["dataset_id", "operation", "keyword", "year", "month", "date_field",
                      "filter_field", "filter_value", "group_field"]}
-    instructions = ("허용 목록의 용인 관련 공공데이터만 분석한다. SQL을 쓰지 말고 구조화된 계획만 낸다. "
-                    "날짜·그룹 조건은 검증된 컬럼만 사용한다. 불명확하면 unsupported. "
-                    f"자료 목록: {[(r['dataset_id'], r['display_name']) for r in catalog]}. "
-                    f"선택된 자료: {selected['dataset_id'] if selected else None}. 검증된 컬럼: {names}. "
-                    f"직전 검증 문맥: {context}.")
-    with httpx.Client(timeout=20) as client:
-        response = client.post("https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={"model": "gpt-4o-mini", "instructions": instructions, "input": question,
-                  "store": False, "max_output_tokens": 350,
-                  "text": {"format": {"type": "json_schema", "name": "yongin_plan", "strict": True, "schema": schema}}})
-        response.raise_for_status()
-        body = response.json()
-    if body.get("status") != "completed":
-        raise ValueError("incomplete plan")
-    parts = [p["text"] for item in body.get("output", []) for p in item.get("content", [])
-             if p.get("type") == "output_text"]
-    return json.loads("".join(parts))
+    instructions = ("질문을 조회 계획으로만 변환한다. SQL이나 답변 문장을 작성하지 않는다. "
+                    "날짜·그룹 조건은 검증된 컬럼만 사용한다. 불명확한 조건은 unsupported. "
+                    "전체 건수로 조건을 바꾸지 않는다. 등록 현황을 운영 중 또는 예약 가능으로 추정하지 않는다. "
+                    "따옴표 안의 문구는 keyword로만 사용하고 그 안의 단어를 분류 조건으로 추가하지 않는다. "
+                    "자료명 자체를 keyword로 다시 검색하지 않는다. 별도 검색어가 없으면 keyword=null. "
+                    "명시적 분류 조건이 없으면 filter_field와 filter_value를 둘 다 null로 둔다. "
+                    "기간 조건이나 월별·연도별 집계가 없으면 date_field도 null로 둔다. "
+                    f"선택된 자료: {selected['dataset_id']} / {selected['display_name']}. "
+                    f"검증된 컬럼과 값: {columns}. 직전 검증 문맥: {context}.")
+    return _model_json(question, instructions, schema, "yongin_plan", api_key)
 
 
 def _validate(plan: dict, selected: dict, columns: dict) -> str | None:
@@ -205,6 +277,8 @@ def _validate(plan: dict, selected: dict, columns: dict) -> str | None:
         return "자료 선택을 확인할 수 없습니다. 자료명을 다시 지정해 주세요."
     if plan.get("operation") not in {"count", "records", "monthly", "yearly", "group"}:
         return "이 질문 유형은 아직 지원하지 않습니다."
+    if bool(plan.get("filter_field")) != bool(plan.get("filter_value")):
+        return "조건 컬럼과 조건 값은 함께 지정해야 합니다."
     if plan.get("keyword") is not None and (not isinstance(plan["keyword"], str) or len(plan["keyword"]) > 80):
         return "검색어는 80자 이내로 지정해 주세요."
     if plan.get("year") is not None and (not isinstance(plan["year"], int) or not 1900 <= plan["year"] <= 2100):
@@ -222,6 +296,41 @@ def _validate(plan: dict, selected: dict, columns: dict) -> str | None:
         return "요청한 지역·분류 값이 검증된 컬럼에 없습니다."
     if plan["operation"] == "group" and not plan.get("group_field"):
         return "비교할 지역·분류 컬럼이 명확하지 않습니다."
+    return None
+
+
+def _validate_question_alignment(plan: dict, question: str, selected: dict,
+                                 context: dict | None) -> str | None:
+    """Reject valid DB values that were never requested by the user."""
+    quoted = re.search(r"[‘'\"]([^’'\"]{1,80})[’'\"]", question)
+    if quoted and plan.get("keyword") != quoted.group(1):
+        return "따옴표 안의 검색어를 그대로 적용해야 합니다."
+    outside = question.replace(quoted.group(0), "") if quoted else question
+    for title_part in re.findall(r"[가-힣A-Za-z0-9]+", selected.get("display_name", "")):
+        if len(title_part) > 1:
+            outside = outside.replace(title_part, "")
+    if not quoted and plan.get("keyword") and _compact(plan["keyword"]) not in _compact(outside):
+        return "자료명을 검색 조건으로 다시 적용할 수 없습니다."
+    same_followup = bool(context and FOLLOWUP.search(question) and
+                         context.get("dataset_id") == selected["dataset_id"])
+    year, month = plan.get("year"), plan.get("month")
+    if year is not None and not re.search(rf"(?<!\d){year}년?(?!\d)", question) and not (
+            same_followup and context.get("year") == year):
+        return "질문에 없는 연도 조건은 적용할 수 없습니다."
+    if month is not None and not re.search(rf"(?<!\d)0?{month}월(?!별)", question) and not (
+            same_followup and context.get("month") == month):
+        return "질문에 없는 월 조건은 적용할 수 없습니다."
+    if plan.get("date_field") and not (plan.get("year") or plan.get("month") or
+                                        plan.get("operation") in {"monthly", "yearly"}):
+        return "기간 분석이 아닌 질문에 날짜 기준을 추가할 수 없습니다."
+    if plan.get("group_field") and plan.get("operation") != "group":
+        return "그룹 분석이 아닌 질문에 비교 기준을 추가할 수 없습니다."
+    value = plan.get("filter_value")
+    inherited = bool(same_followup and
+                     context.get("filter_field") == plan.get("filter_field") and
+                     context.get("filter_value") == value)
+    if value and not inherited and _compact(value) not in _compact(outside):
+        return "질문에 없는 지역·분류 조건은 적용할 수 없습니다."
     return None
 
 
@@ -266,6 +375,7 @@ def _execute(cur, plan: dict, columns: dict) -> list[dict]:
 def analyze(question: str, *, context: dict | None = None, database_url: str | None = None,
             api_key: str | None = None) -> dict[str, Any]:
     question = question.strip()
+    context = _safe_context(context)
     if not 1 <= len(question) <= 300:
         return _blank("clarification", "질문을 1~300자로 입력해 주세요.")
     if FORBIDDEN.search(question):
@@ -273,6 +383,12 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
     if OTHER_CITY.search(question):
         return _blank("unsupported", "용인 관련 허용 자료만 조회합니다.")
     settings = get_settings()
+    model_key = api_key if api_key is not None else settings.openai_api_key
+    model_status = "not_used"
+    def reply(status: str, answer: str) -> dict[str, Any]:
+        result = _blank(status, answer)
+        result["model_status"] = model_status
+        return result
     url = database_url or settings.database_url
     if not url:
         return _blank("error", "읽기 전용 DATABASE_URL이 설정되지 않았습니다.")
@@ -292,12 +408,29 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                         result.update(intent="catalog", result=[{"dataset_id": x["dataset_id"], "dataset_name": x["display_name"]} for x in catalog])
                         return result
                     selected, tied = _choose(question, catalog, context)
+                    if not selected and model_key and not (context or {}).get("selection_id"):
+                        try:
+                            choices = tied if tied else catalog
+                            choice = _llm_select(question, choices, context, model_key)
+                            model_status = "completed"
+                            if not choice.get("needs_clarification"):
+                                selected = next((x for x in choices if x["dataset_id"] == choice.get("dataset_id")), None)
+                                if selected:
+                                    tied = []
+                            elif not tied:
+                                candidate_ids = set(choice.get("candidate_ids", [])[:5])
+                                tied = [x for x in choices if x["dataset_id"] in candidate_ids][:5]
+                        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                            model_status = "failed"
                     if tied:
                         result = _blank("clarification", "자료를 하나 선택해 주세요: " + ", ".join(x["display_name"] for x in tied))
                         result["result"] = [{"dataset_id": x["dataset_id"], "dataset_name": x["display_name"]} for x in tied]
+                        result["model_status"] = model_status
                         return result
                     if not selected:
-                        return _blank("clarification", "자료명을 특정해 주세요. ‘어떤 데이터가 있어?’로 목록을 볼 수 있습니다.")
+                        result = _blank("clarification", "자료명을 특정해 주세요. ‘어떤 데이터가 있어?’로 목록을 볼 수 있습니다.")
+                        result["model_status"] = model_status
+                        return result
                     simple_count = _basic_count(question, selected)
                     columns = {} if simple_count else _columns(cur, selected["dataset_id"])
                     plan = ({"dataset_id": selected["dataset_id"], "operation": "count",
@@ -305,24 +438,29 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                              "filter_field": None, "filter_value": None, "group_field": None}
                             if simple_count else _rule_plan(question, selected, columns, context))
                     interpreter = "rules"
-                    if api_key or settings.openai_api_key:
+                    if model_key:
                         try:
-                            candidate = _llm_plan(question, catalog, selected, columns, context, api_key or settings.openai_api_key)
-                            if not _validate(candidate, selected, columns):
+                            candidate = _llm_plan(question, catalog, selected, columns, context, model_key)
+                            if not (_validate(candidate, selected, columns) or
+                                    _validate_question_alignment(candidate, question, selected, context)):
                                 plan = candidate
                                 interpreter = "llm"
+                                model_status = "completed"
+                            else:
+                                model_status = "rejected"
                         except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                            pass
+                            model_status = "failed"
+                    plan = _inherit_verified_context(plan, question, selected, columns, context)
                     # Rules do not silently reinterpret unsupported qualifiers.
                     if re.search(r"오늘|내일|이번|지난|다음|현재|예약|운영 중|평균|합계|순위|가장|추세|부터|까지", question):
-                        return _blank("unsupported", "현재 운영 상태·예약 가능 여부·범위/순위/평균 분석은 검증된 계약이 없어 지원하지 않습니다.")
+                        return reply("unsupported", "현재 운영 상태·예약 가능 여부·범위/순위/평균 분석은 검증된 계약이 없어 지원하지 않습니다.")
                     if re.search(r"\d{4}년", question) and plan.get("year") is None:
-                        return _blank("unsupported", "연도 조건을 해석하지 못했습니다.")
+                        return reply("unsupported", "연도 조건을 해석하지 못했습니다.")
                     if any(d in question for d in ("처인구", "기흥구", "수지구")) and not plan.get("filter_field"):
-                        return _blank("unsupported", "이 자료에 검증된 구 컬럼이 없어 지역 조건을 적용할 수 없습니다.")
+                        return reply("unsupported", "이 자료에 검증된 구 컬럼이 없어 지역 조건을 적용할 수 없습니다.")
                     reason = _validate(plan, selected, columns)
                     if reason:
-                        return _blank("unsupported", reason)
+                        return reply("unsupported", reason)
                     rows = _execute(cur, plan, columns)
                     source = {"dataset_id": selected["dataset_id"], "dataset_name": selected["display_name"],
                               "provider": selected["provider"], "url": selected["portal_url"],
@@ -332,17 +470,20 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                     op = plan["operation"]
                     total = rows[0]["count"] if op == "count" else sum(r.get("count", 0) for r in rows) if op != "records" else len(rows)
                     answer = (f"{selected['display_name']}: 조건에 맞는 적재 행 {total:,}건입니다." if op == "count" else
-                              f"{selected['display_name']}: {op} 결과 {len(rows)}개 항목, 합계 {total:,}건입니다." if op != "records" else
+                              f"{selected['display_name']}: {op} 결과 {len(rows)}개 항목, 표시된 항목의 합계 {total:,}건입니다." if op != "records" else
                               f"{selected['display_name']}: 원본 행 {len(rows)}건을 표시합니다(최대 {MAX_ROWS}건).")
                     result = _blank("ok", answer)
                     result.update(intent=op, filters={k: v for k, v in plan.items() if k != "dataset_id" and v is not None},
                                   result=rows, sources=[source], interpreter=interpreter,
+                                  model_status=model_status,
                                   calculation={"measure": "현재 활성 적재 행 수", "method": op, "date_field": plan.get("date_field")},
                                   limitations=["등록 현황은 실제 운영 중·예약 가능·현재 행사를 뜻하지 않습니다."] +
-                                              (["날짜가 없는 행은 기간 집계에서 제외합니다."] if op in {"monthly", "yearly"} else []),
+                                              (["날짜가 없는 행은 기간 집계에서 제외합니다."] if op in {"monthly", "yearly"} else []) +
+                                              (["표시 항목이 50개 제한에 도달해 뒤의 항목이 생략됐을 수 있습니다."]
+                                               if op in {"monthly", "yearly", "group"} and len(rows) >= MAX_GROUPS else []),
                                   context={k: plan.get(k) for k in ("dataset_id", "keyword", "year", "month", "date_field", "filter_field", "filter_value")})
                     return result
     except psycopg.errors.QueryCanceled:
-        return _blank("unsupported", "자료가 커서 제한 시간 5초 안에 검증·집계를 마치지 못했습니다. 자료나 조건을 더 좁혀 주세요.")
+        return reply("unsupported", "자료가 커서 제한 시간 5초 안에 검증·집계를 마치지 못했습니다. 자료나 조건을 더 좁혀 주세요.")
     except psycopg.Error:
-        return _blank("error", "읽기 전용 데이터베이스 조회에 실패했습니다. 연결과 권한을 확인해 주세요.")
+        return reply("error", "읽기 전용 데이터베이스 조회에 실패했습니다. 연결과 권한을 확인해 주세요.")

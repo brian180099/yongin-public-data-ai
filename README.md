@@ -16,7 +16,7 @@
 
 ## 실행
 
-`.runtime/analysis.env`에 `yongin_analysis_login` 읽기 전용 PostgreSQL 계정의 `DATABASE_URL`을 설정합니다. 파일은 Git에서 제외되고 기존 `.env`보다 먼저 읽습니다. OpenAI 키는 선택적으로 같은 파일에 `OPENAI_API_KEY`로 설정합니다. 키가 없으면 제한된 규칙 기반 해석만 사용합니다.
+`.runtime/analysis.env`에 호스트 테스트용 `yongin_analysis_login` 읽기 전용 PostgreSQL `DATABASE_URL`을 설정합니다. Docker 분석 서비스는 Git 제외 `.runtime/analysis-container.env`를 읽습니다. 현재 OpenAI 키는 사용자가 넣은 `.env`에서 이 컨테이너 비밀 파일로 옮겨 적용했습니다. 키를 교체하면 컨테이너 비밀 파일도 갱신하고 서비스를 다시 생성해야 합니다. 키가 없으면 제한된 규칙 기반 해석만 사용합니다. 비밀 값은 화면·로그·Git에 표시하지 않습니다.
 
 ```powershell
 python -m pip install -e ".[dev]"
@@ -31,7 +31,9 @@ docker compose -f compose.analysis.yaml up -d --build
 
 답변에는 데이터셋명, 제공기관, 공식 포털 URL, 데이터 기준일, 수집일, 필터, 계산 방법을 담습니다. 등록된 기록 수는 실제 운영 중·예약 가능·현재 행사 수를 뜻하지 않습니다. 원본 행은 최대 20건과 행당 4KB로 제한합니다. DB 트랜잭션은 읽기 전용이며 분석 역할로 전환하고 명령 시간은 5초로 제한합니다. 사용자/모델의 임의 SQL은 실행하지 않습니다.
 
-OpenAI 키가 있으면 Responses API의 엄격한 JSON Schema로 조회 계획만 받습니다. 계획의 데이터셋·컬럼·조건·연산을 서버에서 재검증합니다. **실제 OpenAI 호출은 키 설정 후 미검증**입니다. 규칙 기반 해석은 명시적 자료명·따옴표 검색어·연도/월·단순 후속 질문을 우선 지원합니다. 현재 운영 상태, 예약 가능 여부, 임의 기간, 평균·순위, 다중 자료 결합은 지원하지 않습니다.
+OpenAI 키가 있으면 Responses API의 엄격한 JSON Schema로 자료 선택과 조회 계획만 받습니다. 계획의 데이터셋·컬럼·조건·연산과 질문 원문의 일치 여부를 서버에서 재검증합니다. 모델 계획이 유효하지 않거나 호출에 실패하면 화면에 상태를 표시하고 가능한 규칙 기반 질문만 처리합니다. **실제 OpenAI 호출과 n8n 경유 응답을 검증했습니다.** 규칙 기반 해석은 명시적 자료명·따옴표 검색어·연도/월·단순 후속 질문을 우선 지원합니다. 현재 운영 상태, 예약 가능 여부, 임의 기간, 평균·순위, 다중 자료 결합은 지원하지 않습니다.
+
+웹에서는 예시 질문을 누르거나 채팅에 입력합니다. 자료가 모호하면 후보 버튼을 눌러 원래 질문을 다시 실행할 수 있습니다. 답변은 건수·표/차트, 적용 조건, 계산 방식, 데이터셋명·제공기관·기준일·수집일·공식 포털 링크, 실제 모델 사용 상태를 함께 보여 줍니다. 직전 성공한 자료의 검증된 조건만 명시적 후속 질문에 이어받습니다. 자료 목록은 화면에서 검색할 수 있습니다.
 
 ## 실제 검증 질문
 
@@ -43,6 +45,8 @@ OpenAI 키가 있으면 Responses API의 엄격한 JSON Schema로 조회 계획�
 ```powershell
 python -m pytest
 $env:YONGIN_LIVE_TEST='1'; python -m pytest tests/test_agent_live.py
+$env:YONGIN_LLM_LIVE_TEST='1'; python -m pytest tests/test_agent_openai_live.py
+$env:YONGIN_WEBHOOK_LIVE_TEST='1'; python -m pytest tests/test_webhook_live.py
 ```
 
 라이브 테스트는 실제 읽기 전용 DB 연결을 사용하며 기본 테스트에서는 건너뜁니다. 수집기 원본·현재 레코드와 Git 이력은 변경하지 않았습니다.
