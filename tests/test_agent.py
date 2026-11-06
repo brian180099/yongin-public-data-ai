@@ -1,5 +1,7 @@
+from yongin_data.analysis import agent
 from yongin_data.analysis.agent import (_basic_count, _choose, _inherit_verified_context,
-                                        _rule_plan, _validate, _validate_question_alignment, analyze)
+                                        _merge_catalogs, _rule_plan, _validate,
+                                        _validate_question_alignment, analyze)
 
 
 def test_refuses_sql_and_other_cities_without_db():
@@ -79,6 +81,65 @@ def test_basic_count_does_not_discard_a_condition():
     assert _basic_count("새올민원 처리 현황은 몇 건이야?", selected)
     assert not _basic_count("2025년 새올민원 처리 현황은 몇 건이야?", selected)
     assert not _basic_count("기흥구 새올민원 처리 현황은 몇 건이야?", selected)
+
+
+def test_basic_count_accepts_portal_title_suffix_without_dropping_conditions():
+    selected = {"dataset_id": "forest", "display_name": "경기도 용인시_통합 홈페이지 숲체험 정보 / 숲체험일정 정보"}
+    assert _basic_count("숲체험일정은 몇 건이야?", selected)
+    assert not _basic_count("2025년 숲체험일정은 몇 건이야?", selected)
+    assert not _basic_count("기흥구 숲체험일정은 몇 건이야?", selected)
+
+
+def test_validated_columns_cache_tracks_source_version(monkeypatch):
+    agent._column_cache.clear()
+    calls = []
+
+    def inspect(_cursor, dataset_id):
+        calls.append(dataset_id)
+        return {"시작일": {"kind": "date", "format": "%Y-%m-%d"}}
+
+    monkeypatch.setattr(agent, "_columns", inspect)
+    source = {"dataset_id": "forest", "last_success_at": "run-1", "collected_at": "day-1"}
+    first = agent._validated_columns(object(), source)
+    first["시작일"]["kind"] = "group"
+    assert agent._validated_columns(object(), source)["시작일"]["kind"] == "date"
+    assert calls == ["forest"]
+    agent._validated_columns(object(), {**source, "last_success_at": "run-2"})
+    assert calls == ["forest", "forest"]
+    agent._column_cache.clear()
+
+
+def test_catalog_cache_refreshes_after_short_ttl(monkeypatch):
+    agent._catalog_cache.clear()
+    clock = [100.0]
+    calls = []
+
+    def read_catalog(_cursor):
+        calls.append(True)
+        return [{"dataset_id": str(len(calls))}]
+
+    monkeypatch.setattr(agent, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(agent, "_catalog", read_catalog)
+    first = agent._catalog_cached(object())
+    first[0]["dataset_id"] = "changed"
+    assert agent._catalog_cached(object())[0]["dataset_id"] == "1"
+    assert len(calls) == 1
+    clock[0] += agent.CATALOG_CACHE_SECONDS + 1
+    assert agent._catalog_cached(object())[0]["dataset_id"] == "2"
+    agent._catalog_cache.clear()
+
+
+def test_newer_supabase_source_wins_but_equal_version_stays_local():
+    local = [{"dataset_id": "shared", "display_name": "공통", "last_success_at": 10},
+             {"dataset_id": "local", "display_name": "로컬", "last_success_at": 10}]
+    remote = [{"dataset_id": "shared", "display_name": "공통", "last_success_at": 10},
+              {"dataset_id": "new", "display_name": "신규", "last_success_at": 11}]
+    catalog, backends = _merge_catalogs(local, remote)
+    assert len(catalog) == 3
+    assert backends == {"shared": "local", "local": "local", "new": "supabase"}
+    remote[0]["last_success_at"] = 12
+    _, backends = _merge_catalogs(local, remote)
+    assert backends["shared"] == "supabase"
 
 
 def test_candidate_selection_requires_matching_pending_question():

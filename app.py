@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-WEBHOOK = os.getenv("YONGIN_ANALYSIS_WEBHOOK_URL", "http://n8n:5678/webhook/yongin-analysis-v1")
+WEBHOOK = os.getenv("YONGIN_ANALYSIS_WEBHOOK_URL", "http://n8n:5678/webhook/yongin-question-agent-v1")
 EXAMPLES = (
     "숲체험일정은 몇 건이야?",
     "도서관 달력에서 ‘유아 클레이 특강’은 몇 건이야?",
@@ -34,8 +34,9 @@ def ask(question: str, context: dict | None) -> dict:
                 "model_status": "not_used", "context": None, "intent": "unknown", "limitations": []}
 
 
-st.set_page_config(page_title="용인시 공공데이터", page_icon="🔎", layout="wide")
-st.title("용인시 공공데이터")
+st.set_page_config(page_title="공공데이터 분석 서비스", page_icon="🔎", layout="wide")
+st.title("공공데이터 분석 서비스")
+st.caption("현재 분석 가능 지역: 용인시")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -106,7 +107,8 @@ for index, message in enumerate(st.session_state.messages):
                     st.write(OP_LABELS.get(calculation.get("method"), calculation.get("method", "조회")))
                 for source in sources:
                     st.write(source["dataset_name"])
-                    st.caption(f"{source['provider']} · 기준일 {source['reference_date'] or '미확인'} · 수집일 {source['collected_at'] or '미확인'}")
+                    location = "Supabase" if source.get("database") == "supabase" else "로컬 DB"
+                    st.caption(f"{source['provider']} · {location} · 기준일 {source['reference_date'] or '미확인'} · 수집일 {source['collected_at'] or '미확인'}")
                     if source.get("url"):
                         st.link_button("공식 원본 보기", source["url"])
                 for limitation in limitations:

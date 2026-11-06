@@ -24,7 +24,7 @@ services:
       - ./.runtime/analysis-container.env
     environment:
       TZ: Asia/Seoul
-      YONGIN_ANALYSIS_WEBHOOK_URL: http://n8n:5678/webhook/yongin-analysis-v1
+      YONGIN_ANALYSIS_WEBHOOK_URL: http://n8n:5678/webhook/yongin-question-agent-v1
     command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
     ports:
       - "127.0.0.1:8501:8501"

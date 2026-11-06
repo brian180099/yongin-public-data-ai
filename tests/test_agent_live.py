@@ -4,7 +4,9 @@ import os
 
 import pytest
 
+from yongin_data.analysis import agent
 from yongin_data.analysis.agent import analyze
+from yongin_data.config import get_settings
 
 
 pytestmark = pytest.mark.skipif(os.getenv("YONGIN_LIVE_TEST") != "1", reason="live DB opt in")
@@ -26,3 +28,32 @@ def test_live_questions():
         assert dated["filters"]["date_field"] == "숲체험일정시작일"
     for question in ("수원시 체육시설은 몇 건이야?", "DROP TABLE collector.datasets", "없는자료는 몇 건이야?"):
         assert analyze(question)["status"] in {"unsupported", "clarification"}
+
+
+def test_live_followup_keeps_verified_year_and_dataset():
+    first = analyze("2019년 숲체험일정은 몇 건이야?", api_key="")
+    assert first["status"] == "ok"
+    assert first["result"] == [{"count": 1837}]
+    followup = analyze("월별로 다시", context=first["context"], api_key="")
+    assert followup["status"] == "ok"
+    assert followup["intent"] == "monthly"
+    assert sum(row["count"] for row in followup["result"]) == 1837
+    assert followup["sources"][0]["dataset_id"] == first["sources"][0]["dataset_id"]
+
+
+def test_live_supabase_backend_uses_read_only_source(monkeypatch):
+    if not get_settings().supabase_analysis_db_url:
+        pytest.skip("read-only Supabase DSN not configured")
+    merge = agent._merge_catalogs
+
+    def select_remote(local, remote):
+        catalog, backends = merge(local, remote)
+        forest = next(row for row in catalog if row["display_name"].endswith("숲체험일정 정보"))
+        backends[forest["dataset_id"]] = "supabase"
+        return catalog, backends
+
+    monkeypatch.setattr(agent, "_merge_catalogs", select_remote)
+    result = analyze("숲체험일정은 몇 건이야?", api_key="")
+    assert result["status"] == "ok"
+    assert result["result"] == [{"count": 8830}]
+    assert result["sources"][0]["database"] == "supabase"

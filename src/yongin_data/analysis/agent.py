@@ -5,18 +5,35 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from atexit import register
+from collections import OrderedDict
+from contextlib import ExitStack
+from copy import deepcopy
 from datetime import datetime
+from threading import Lock
+from time import monotonic
 from typing import Any
 
 import httpx
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from yongin_data.config import get_settings
 
 MAX_ROWS = 20
 MAX_GROUPS = 50
 MAX_TEXT = 160
+COLUMN_CACHE_MAX = 64
+CATALOG_CACHE_SECONDS = 30
+CATALOG_CACHE_MAX = 4
+_column_cache: OrderedDict[tuple, dict[str, dict]] = OrderedDict()
+_column_cache_lock = Lock()
+_catalog_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_catalog_cache_lock = Lock()
+_remote_pool_lock = Lock()
+_remote_pool_url: str | None = None
+_remote_pool: ConnectionPool | None = None
 FOLLOWUP = re.compile(r"그중|그 중|그거|월별로|연도별로|다시")
 FORBIDDEN = re.compile(r"\b(select|drop|insert|update|delete|alter|truncate|grant|create)\b|삭제|수정해|업데이트해", re.I)
 OTHER_CITY = re.compile(r"수원시|성남시|서울시|화성시|안양시|고양시|부천시|평택시")
@@ -36,6 +53,16 @@ def _blank(status: str = "unsupported", answer: str = "") -> dict[str, Any]:
             "model_status": "not_used"}
 
 
+def _database_identity(cur) -> tuple:
+    info = getattr(getattr(cur, "connection", None), "info", None)
+    return tuple(getattr(info, name, None) for name in ("host", "port", "dbname", "user"))
+
+
+def _database_identity_from_url(url: str) -> tuple:
+    info = psycopg.conninfo.conninfo_to_dict(url)
+    return (info.get("host"), int(info.get("port") or 5432), info.get("dbname"), info.get("user"))
+
+
 def _catalog(cur) -> list[dict]:
     cur.execute("""select s.dataset_id, s.display_name, s.provider, s.portal_url,
                           s.reference_date, s.collected_at, s.last_success_at
@@ -45,6 +72,70 @@ def _catalog(cur) -> list[dict]:
                                  where r.dataset_id=s.dataset_id)
                    order by s.display_name, s.dataset_id""")
     return [dict(row) for row in cur.fetchall()]
+
+
+def _catalog_cached(cur=None, *, key: tuple | None = None) -> list[dict] | None:
+    """Keep the large source-list query fresh without repeating it per question."""
+    key = key if key is not None else _database_identity(cur)
+    now = monotonic()
+    with _catalog_cache_lock:
+        cached = _catalog_cache.get(key)
+        if cached and now - cached[0] < CATALOG_CACHE_SECONDS:
+            return deepcopy(cached[1])
+    if cur is None:
+        return None
+    catalog = _catalog(cur)
+    with _catalog_cache_lock:
+        _catalog_cache[key] = (monotonic(), deepcopy(catalog))
+        while len(_catalog_cache) > CATALOG_CACHE_MAX:
+            _catalog_cache.pop(next(iter(_catalog_cache)))
+    return catalog
+
+
+def _merge_catalogs(local: list[dict], remote: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Use the newest successful source version; keep local on a tie."""
+    chosen = {row["dataset_id"]: row for row in local}
+    backend = {row["dataset_id"]: "local" for row in local}
+    for row in remote:
+        dataset_id = row["dataset_id"]
+        previous = chosen.get(dataset_id)
+        current_version = row.get("last_success_at") or row.get("collected_at")
+        previous_version = ((previous.get("last_success_at") or previous.get("collected_at"))
+                            if previous else None)
+        if previous is None or (current_version is not None and
+                                (previous_version is None or current_version > previous_version)):
+            chosen[dataset_id] = row
+            backend[dataset_id] = "supabase"
+    return sorted(chosen.values(), key=lambda row: (row["display_name"], row["dataset_id"])), backend
+
+
+def _prepare_reader(cur) -> bool:
+    cur.execute("set transaction read only")
+    cur.execute("set local statement_timeout = '5000ms'")
+    cur.execute("select session_user")
+    if cur.fetchone()["session_user"] != "yongin_analysis_login":
+        return False
+    cur.execute("set local role yongin_analysis_reader")
+    return True
+
+
+def _supabase_pool(url: str) -> ConnectionPool:
+    global _remote_pool, _remote_pool_url
+    with _remote_pool_lock:
+        if _remote_pool is None or _remote_pool_url != url:
+            if _remote_pool is not None:
+                _remote_pool.close()
+            _remote_pool = ConnectionPool(conninfo=url, min_size=0, max_size=4, timeout=10,
+                                          kwargs={"connect_timeout": 5, "row_factory": dict_row},
+                                          open=True, name="yongin-question-supabase")
+            _remote_pool_url = url
+        return _remote_pool
+
+
+@register
+def _close_supabase_pool() -> None:
+    if _remote_pool is not None:
+        _remote_pool.close()
 
 
 def _choose(question: str, catalog: list[dict], context: dict | None) -> tuple[dict | None, list[dict]]:
@@ -86,8 +177,9 @@ def _basic_count(question: str, selected: dict) -> bool:
     """Recognize an unqualified count before expensive column profiling."""
     compact = _compact(question)
     title = selected["display_name"]
-    selectors = [selected["dataset_id"], title, title.split(" / ")[-1],
-                 title.split(" / ")[-1].split("_")[-1]]
+    member = title.split(" / ")[-1].split("_")[-1]
+    selectors = [selected["dataset_id"], title, title.split(" / ")[-1], member,
+                 re.sub(r"(?:\s*(?:정보|현황|데이터))+$", "", member)]
     matched = sorted((_compact(s) for s in selectors if _compact(s) in compact), key=len, reverse=True)
     if not matched:
         return False
@@ -140,6 +232,56 @@ def _columns(cur, dataset_id: str) -> dict[str, dict]:
             if values and len(values) <= MAX_GROUPS:
                 validated[name] = {"kind": "group", "values": values}
     return validated
+
+
+def _stored_columns(cur, dataset_id: str) -> dict[str, dict] | None:
+    """Accept a persisted contract only when run ID, raw SHA and timestamp match."""
+    try:
+        with cur.connection.transaction():
+            cur.execute("""select c.column_name, c.kind, c.date_format, c.group_values
+                           from analytics.dataset_contract_versions v
+                           join analytics.dataset_source_fingerprints f
+                             on f.dataset_id=v.dataset_id
+                           left join analytics.dataset_column_contracts c
+                             on c.source_database=v.source_database and c.dataset_id=v.dataset_id
+                           where v.source_database='local' and v.dataset_id=%s
+                             and v.validation_status='validated'
+                             and v.source_last_success_at is not distinct from f.last_success_at
+                             and v.source_run_id is not distinct from f.source_run_id
+                             and v.source_raw_sha256 is not distinct from f.source_raw_sha256""",
+                        (dataset_id,))
+            rows = cur.fetchall()
+    except psycopg.errors.UndefinedTable:
+        return None
+    if not rows:
+        return None
+    return {row["column_name"]: ({"kind": "date", "format": row["date_format"]}
+                                 if row["kind"] == "date" else
+                                 {"kind": "group", "values": row["group_values"]})
+            for row in rows if row["column_name"] is not None}
+
+
+def _validated_columns(cur, selected: dict, backend: str = "local") -> dict[str, dict]:
+    """Reuse a complete validation while its collected source version is unchanged."""
+    if backend == "local" and getattr(cur, "connection", None) is not None:
+        stored = _stored_columns(cur, selected["dataset_id"])
+        if stored is not None:
+            return stored
+    database = _database_identity(cur)
+    key = (database, selected["dataset_id"], selected.get("last_success_at"),
+           selected.get("collected_at"))
+    with _column_cache_lock:
+        cached = _column_cache.get(key)
+        if cached is not None:
+            _column_cache.move_to_end(key)
+            return deepcopy(cached)
+    columns = _columns(cur, selected["dataset_id"])
+    with _column_cache_lock:
+        _column_cache[key] = deepcopy(columns)
+        _column_cache.move_to_end(key)
+        while len(_column_cache) > COLUMN_CACHE_MAX:
+            _column_cache.popitem(last=False)
+    return columns
 
 
 def _valid_date(value: str, fmt: str) -> bool:
@@ -373,7 +515,7 @@ def _execute(cur, plan: dict, columns: dict) -> list[dict]:
 
 
 def analyze(question: str, *, context: dict | None = None, database_url: str | None = None,
-            api_key: str | None = None) -> dict[str, Any]:
+            supabase_database_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
     question = question.strip()
     context = _safe_context(context)
     if not 1 <= len(question) <= 300:
@@ -390,19 +532,29 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
         result["model_status"] = model_status
         return result
     url = database_url or settings.database_url
+    remote_url = supabase_database_url if supabase_database_url is not None else settings.supabase_analysis_db_url
     if not url:
         return _blank("error", "읽기 전용 DATABASE_URL이 설정되지 않았습니다.")
     try:
-        with psycopg.connect(url, connect_timeout=5, row_factory=dict_row) as conn:
+        with ExitStack() as stack:
+            conn = stack.enter_context(psycopg.connect(url, connect_timeout=5, row_factory=dict_row))
             with conn.transaction():
                 with conn.cursor() as cur:
-                    cur.execute("set transaction read only")
-                    cur.execute("set local statement_timeout = '5000ms'")
-                    cur.execute("select session_user")
-                    if cur.fetchone()["session_user"] != "yongin_analysis_login":
+                    if not _prepare_reader(cur):
                         return _blank("error", "분석 전용 읽기 계정으로 연결해야 합니다.")
-                    cur.execute("set local role yongin_analysis_reader")
-                    catalog = _catalog(cur)
+                    local_catalog = _catalog_cached(cur)
+                    remote_cur = None
+                    remote_catalog = []
+                    if remote_url:
+                        remote_catalog = _catalog_cached(key=_database_identity_from_url(remote_url))
+                        if remote_catalog is None:
+                            remote_conn = stack.enter_context(_supabase_pool(remote_url).connection())
+                            stack.enter_context(remote_conn.transaction())
+                            remote_cur = stack.enter_context(remote_conn.cursor())
+                            if not _prepare_reader(remote_cur):
+                                return _blank("error", "Supabase 분석 연결은 읽기 전용 계정을 사용해야 합니다.")
+                            remote_catalog = _catalog_cached(remote_cur)
+                    catalog, backends = _merge_catalogs(local_catalog, remote_catalog)
                     if re.search(r"어떤 데이터|데이터셋|자료 목록|데이터 목록", question):
                         result = _blank("ok", f"적재된 용인 관련 공공데이터 {len(catalog)}종입니다.")
                         result.update(intent="catalog", result=[{"dataset_id": x["dataset_id"], "dataset_name": x["display_name"]} for x in catalog])
@@ -431,14 +583,23 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                         result = _blank("clarification", "자료명을 특정해 주세요. ‘어떤 데이터가 있어?’로 목록을 볼 수 있습니다.")
                         result["model_status"] = model_status
                         return result
+                    backend = backends[selected["dataset_id"]]
+                    if backend == "supabase":
+                        if remote_cur is None:
+                            remote_conn = stack.enter_context(_supabase_pool(remote_url).connection())
+                            stack.enter_context(remote_conn.transaction())
+                            remote_cur = stack.enter_context(remote_conn.cursor())
+                            if not _prepare_reader(remote_cur):
+                                return _blank("error", "Supabase 분석 연결은 읽기 전용 계정을 사용해야 합니다.")
+                        cur = remote_cur
                     simple_count = _basic_count(question, selected)
-                    columns = {} if simple_count else _columns(cur, selected["dataset_id"])
+                    columns = {} if simple_count else _validated_columns(cur, selected, backend)
                     plan = ({"dataset_id": selected["dataset_id"], "operation": "count",
                              "keyword": None, "year": None, "month": None, "date_field": None,
                              "filter_field": None, "filter_value": None, "group_field": None}
                             if simple_count else _rule_plan(question, selected, columns, context))
                     interpreter = "rules"
-                    if model_key:
+                    if model_key and not simple_count:
                         try:
                             candidate = _llm_plan(question, catalog, selected, columns, context, model_key)
                             if not (_validate(candidate, selected, columns) or
@@ -464,6 +625,7 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                     rows = _execute(cur, plan, columns)
                     source = {"dataset_id": selected["dataset_id"], "dataset_name": selected["display_name"],
                               "provider": selected["provider"], "url": selected["portal_url"],
+                              "database": backend,
                               "reference_date": str(selected["reference_date"]) if selected["reference_date"] else None,
                               "collected_at": selected["collected_at"].isoformat() if selected["collected_at"] else None,
                               "last_success_at": selected["last_success_at"].isoformat() if selected["last_success_at"] else None}
@@ -485,5 +647,5 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                     return result
     except psycopg.errors.QueryCanceled:
         return reply("unsupported", "자료가 커서 제한 시간 5초 안에 검증·집계를 마치지 못했습니다. 자료나 조건을 더 좁혀 주세요.")
-    except psycopg.Error:
+    except (psycopg.Error, PoolClosed, PoolTimeout):
         return reply("error", "읽기 전용 데이터베이스 조회에 실패했습니다. 연결과 권한을 확인해 주세요.")

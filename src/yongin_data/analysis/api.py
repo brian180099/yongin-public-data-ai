@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from yongin_data.analysis.agent import analyze
 from yongin_data.config import get_settings
 
-app = FastAPI(title="Yongin question analysis")
+app = FastAPI(title="Public Data Analysis Service")
 
 
 class QuestionRequest(BaseModel):

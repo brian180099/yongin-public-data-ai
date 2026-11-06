@@ -20,11 +20,12 @@ class Settings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     database_url: str | None = None
+    supabase_analysis_db_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     data_go_kr_service_key: str | None = None
 
-    @field_validator("database_url")
+    @field_validator("database_url", "supabase_analysis_db_url")
     @classmethod
     def validate_database_url(cls, value: str | None) -> str | None:
         if value is None:
@@ -50,6 +51,7 @@ def get_settings() -> Settings:
     load_dotenv(PROJECT_ROOT / ".env", override=False)
     return Settings(
         database_url=os.getenv("DATABASE_URL"),
+        supabase_analysis_db_url=os.getenv("SUPABASE_ANALYSIS_DB_URL"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL") or "gpt-4o-mini",
         data_go_kr_service_key=os.getenv("DATA_GO_KR_SERVICE_KEY"),
