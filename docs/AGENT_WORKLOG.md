@@ -78,3 +78,19 @@ Claude Code와 Codex가 이 저장소에서 수행한 작업을 시간순으로 
 - **커밋**: 미커밋
 - **검증**: grep으로 `ANALYSIS_SERVICE_URL`이 `.py` 어디에서도 안 읽히는 것, `SUPABASE_ANALYSIS_DB_URL`은 agent.py:504, `OPENAI_MODEL`은 agent.py:330/config.py에서 읽히는 것 확인. `.env`(비밀)는 변경하지 않음. 코드 변경 없어 테스트 미실행.
 - **다음 작업자에게**: 실제 `.env`에는 `DATABASE_URL`, `OPENAI_API_KEY`만 설정돼 있음. `SUPABASE_ANALYSIS_DB_URL`이 비어 있어 로컬·Supabase 카탈로그 비교는 현재 로컬 단일 경로로만 동작함. Supabase 비교가 필요하면 `.env`에 해당 키를 채워야 함.
+
+## 2026-11-06 12:10 · Claude Code
+
+- **요약**: n8n 워크플로 4종 파일과 실행 중인 webhook을 실제 점검. 신규 경로(`yongin-question-agent-v1`→question-agent:8091)와 구 경로(`yongin-analysis-v1`→yongin-analysis:8090)가 둘 다 활성인 이중 경로를 확인. 구 서비스는 폐기된 옛 MVP 범위(생활여가·문화·체육 274종)로 응답. 사용자 의도(2-에이전트)에는 구 경로가 불필요함을 정리.
+- **변경 파일**: 없음(점검·분석만). 앞서 `.env.example`은 브랜치 `chore/env-example-sync`의 커밋 `0bfe11b`에 있음.
+- **커밋**: 미커밋(점검)
+- **검증**: 두 webhook에 동일 질문 POST → 신규는 316종 기준 명확화 응답, 구는 274종 즉답. `yongin-analysis` 컨테이너 `Up(healthy)`, `compose.collector.yaml`에서 정의 확인. 웹(app.py:11)은 신규 webhook만 호출함을 확인.
+- **다음 작업자에게**: Codex가 이중 경로(구 `yongin-analysis` 컨테이너 + `yongin-analysis-v1` webhook) 정리 필요. 이 저장소 브랜치 전략: `main`=2988869(기능 커밋 없음), 내 문서/설정 커밋은 `chore/env-example-sync`. Codex의 11-06 기능작업(app.py 등 13개 수정+신규 3개)은 여전히 미커밋 상태로 보존됨.
+
+## 2026-11-06 12:22 · Codex
+
+- **요약**: 사용자 요청에 따라 구 n8n 질문 Webhook과 수집 저장소의 옛 분석 컨테이너를 중지하고, 질문 웹은 `YNGN03QuestionAgentV1` 한 경로만 사용하도록 확인했다. 로컬 `analytics` 스키마에 원본 SHA·수집 실행 ID·검증 시각과 허용 컬럼을 담는 분석 전용 계약 캐시를 추가하고 MVP 자료 3개를 검증·적재했다. 원본·현재 레코드는 수정하지 않았다.
+- **변경 파일**: `README.md`, `sql/001_analysis_column_contracts.sql`, `scripts/refresh_column_contracts.py`, `src/yongin_data/analysis/agent.py`, `tests/test_contract_cache_live.py`, `docs/AGENT_WORKLOG.md`; 앞선 미커밋 기능 변경과 Claude Code의 `0bfe11b` 설정 커밋도 현재 브랜치에 보존돼 있다.
+- **커밋**: 이 항목 작성 시점 미커밋.
+- **검증**: 분석 전체 라이브 테스트 33개 통과. 구 Webhook HTTP 404, 새 Webhook HTTP 200·숲체험일정 8,830건. 컬럼 계약 3개 데이터셋·7개 컬럼, 실행 ID·SHA·검증 시각 존재, 분석 역할의 캐시 쓰기 권한 없음. 실패 시도 기록과 이전 정상 계약 유지 확인. 실행 컨테이너 재빌드 완료.
+- **다음 작업자에게**: 현재 계약은 로컬 MVP 3개만 영구 캐시한다. 다른 로컬 자료와 Supabase 최신본은 제한된 메모리 캐시/전체 값 검사를 사용한다. 운영 백업·복구와 브라우저 육안 확인, 날짜 범위·수치 집계 확장은 남아 있다. 수집 저장소의 구 분석 서비스는 다시 실행하지 말 것.
