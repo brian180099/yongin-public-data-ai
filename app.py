@@ -12,12 +12,16 @@ WEBHOOK = os.getenv("YONGIN_ANALYSIS_WEBHOOK_URL", "http://n8n:5678/webhook/yong
 EXAMPLES = (
     "숲체험일정은 몇 건이야?",
     "도서관 달력에서 ‘유아 클레이 특강’은 몇 건이야?",
+    "용인시 인구 분포 분석해줘",
     "어떤 데이터가 있어?",
 )
 FILTER_LABELS = {"keyword": "검색어", "year": "연도", "month": "월", "date_field": "날짜 기준",
-                 "filter_field": "조건 컬럼", "filter_value": "조건 값", "group_field": "비교 기준"}
+                 "filter_field": "조건 컬럼", "filter_value": "조건 값", "group_field": "비교 기준",
+                 "data_date": "자료 기준일", "sex": "성별", "metric": "인구 항목", "district": "지역"}
 OP_LABELS = {"overview": "자료 개요", "count": "조건에 맞는 행 수", "records": "원본 행 조회", "monthly": "월별 건수",
-             "yearly": "연도별 건수", "group": "그룹별 건수"}
+             "yearly": "연도별 건수", "group": "그룹별 건수", "population_sum": "행정동 인구 수를 구별로 합산"}
+POPULATION_LABELS = {"infant": "영유아 0~5세", "school": "학령아동 6~17세", "youth": "청년 19~34세",
+                     "middle": "신중년 51~64세", "elder": "고령자 65세 이상", "working": "생산가능인구 15~64세"}
 
 
 def record_frame(rows: list[dict]) -> pd.DataFrame:
@@ -41,6 +45,20 @@ def result_chart(rows: list[dict], intent: str) -> None:
     with st.expander("집계표 보기"):
         frame = frame.rename(columns={key: "기간" if key == "period" else "분류", "count": "건수"})
         st.dataframe(frame, hide_index=True, width="stretch")
+
+
+def population_chart(rows: list[dict], visualization: dict, filters: dict) -> None:
+    frame = pd.DataFrame(rows).set_index("district")
+    if "count" in frame:
+        title = filters.get("metric", "인구")
+        st.bar_chart(frame.rename(columns={"count": f"{title} (명)"}), height=310)
+        table = frame.rename_axis("구").rename(columns={"count": "인구 수 (명)"})
+    else:
+        labelled = frame.rename(columns=POPULATION_LABELS)
+        st.bar_chart(labelled[["청년 19~34세", "고령자 65세 이상"]], height=310)
+        table = labelled.rename_axis("구")
+    with st.expander("구별 인구 수 보기"):
+        st.dataframe(table.style.format("{:,.0f}"), width="stretch")
 
 
 def ask(question: str, context: dict | None) -> dict:
@@ -109,6 +127,8 @@ for index, message in enumerate(st.session_state.messages):
                 st.metric("기록 수", f"{rows[0]['count']:,}건")
             elif intent in {"monthly", "yearly", "group"}:
                 result_chart(rows, intent)
+            elif intent == "population":
+                population_chart(rows, message.get("visualization") or {}, message.get("filters") or {})
             elif intent == "records":
                 frame = record_frame(rows)
                 if not frame.empty:
@@ -132,6 +152,8 @@ for index, message in enumerate(st.session_state.messages):
         sources = message.get("sources") or []
         calculation = message.get("calculation")
         limitations = message.get("limitations") or []
+        if message.get("intent") == "population" and limitations:
+            st.caption(limitations[0])
         if filters or sources or calculation or limitations:
             with st.expander("출처 및 조회 기준"):
                 if filters:
@@ -158,6 +180,7 @@ if question_to_send:
         {"role": "assistant", "content": data.get("answer", "답변을 생성하지 못했습니다."),
          "question": question_to_send, "status": data["status"], "intent": data.get("intent"),
          "result": data.get("result", []), "sources": data.get("sources", []),
+         "visualization": data.get("visualization"),
          "calculation": data.get("calculation"), "filters": data.get("filters", {}),
          "interpreter": data.get("interpreter", "rules"), "model_status": data.get("model_status"),
          "suggested_questions": data.get("suggested_questions", []),

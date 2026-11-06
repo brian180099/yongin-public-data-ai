@@ -49,6 +49,16 @@ def test_selected_ambiguous_dataset_opens_overview():
     assert result["result"][0]["count"] > 0
 
 
+def test_population_distribution_uses_verified_person_sums():
+    result = analyze("용인시 청년 인구를 구별로 비교해줘", api_key="")
+    assert result["status"] == "ok" and result["intent"] == "population"
+    assert result["sources"][0]["dataset_id"] == "portal_csv_15135861"
+    assert {row["district"]: row["count"] for row in result["result"]} == {
+        "기흥구": 85210, "수지구": 68070, "처인구": 55495}
+    assert result["calculation"]["measure"] == "검증된 인구 수치 합계"
+    assert analyze("용인시 인구및세대 현황은 몇 명이야?", api_key="")["status"] == "unsupported"
+
+
 def test_live_supabase_backend_uses_read_only_source(monkeypatch):
     if not get_settings().supabase_analysis_db_url:
         pytest.skip("read-only Supabase DSN not configured")

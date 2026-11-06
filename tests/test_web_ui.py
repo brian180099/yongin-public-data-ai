@@ -58,3 +58,20 @@ def test_monthly_result_renders_chart_and_followup_buttons():
     assert not app.exception
     assert any(expander.label == "집계표 보기" for expander in app.expander)
     assert any("숲체험일정은 몇 건이야?" == button.label for button in app.button)
+
+
+def test_population_result_renders_person_chart_not_record_metric():
+    response = Mock()
+    response.json.return_value = {
+        "status": "ok", "answer": "청년 인구 15명", "intent": "population",
+        "result": [{"district": "기흥구", "count": 5}, {"district": "수지구", "count": 6},
+                   {"district": "처인구", "count": 4}],
+        "visualization": {"type": "population", "metrics": ["youth"], "unit": "명"},
+        "filters": {"metric": "청년"}, "limitations": ["연령 구간을 더해 전체 인구로 쓰지 않습니다."],
+    }
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+    with patch("requests.post", return_value=response):
+        app.button[0].click().run()
+    assert not app.exception
+    assert not app.metric
+    assert any(expander.label == "구별 인구 수 보기" for expander in app.expander)

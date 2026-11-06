@@ -43,3 +43,10 @@ def test_webhook_monthly_and_group_calculations():
     grouped = _ask("도서관 달력 일정유형별 건수 알려줘")
     assert grouped["status"] == "ok" and grouped["intent"] == "group"
     assert sum(row["count"] for row in grouped["result"]) == 5773
+
+
+def test_webhook_population_uses_person_counts():
+    result = _ask("용인시 청년 인구를 구별로 비교해줘")
+    assert result["status"] == "ok" and result["intent"] == "population"
+    assert sum(row["count"] for row in result["result"]) == 208775
+    assert result["visualization"]["unit"] == "명"

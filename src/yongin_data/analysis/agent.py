@@ -21,6 +21,9 @@ from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from yongin_data.config import get_settings
 from yongin_data.analysis.presentation import describe, suggestions
+from yongin_data.analysis.population import (DATASET_ID as POPULATION_DATASET_ID,
+                                             PopulationContractError, summarize as summarize_population,
+                                             wants_population)
 
 MAX_ROWS = 20
 MAX_GROUPS = 50
@@ -606,6 +609,26 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                             if not _prepare_reader(remote_cur):
                                 return _blank("error", "Supabase 분석 연결은 읽기 전용 계정을 사용해야 합니다.")
                         cur = remote_cur
+                    source = {"dataset_id": selected["dataset_id"], "dataset_name": selected["display_name"],
+                              "provider": selected["provider"], "url": selected["portal_url"],
+                              "database": backend,
+                              "reference_date": str(selected["reference_date"]) if selected["reference_date"] else None,
+                              "collected_at": selected["collected_at"].isoformat() if selected["collected_at"] else None,
+                              "last_success_at": selected["last_success_at"].isoformat() if selected["last_success_at"] else None}
+                    if selected["dataset_id"] == POPULATION_DATASET_ID and wants_population(question):
+                        try:
+                            population = summarize_population(cur, question, source["reference_date"])
+                        except PopulationContractError as exc:
+                            return reply("unsupported", str(exc))
+                        result = _blank("ok", population["answer"])
+                        result.update(intent="population", result=population["result"],
+                                      visualization=population["visualization"], filters=population["filters"],
+                                      calculation=population["calculation"], limitations=population["limitations"],
+                                      suggested_questions=population["suggested_questions"], sources=[source],
+                                      model_status=model_status, context={"dataset_id": selected["dataset_id"]})
+                        return result
+                    if re.search(r"몇\s*명|인구.*(?:구별|분포|비교)", question):
+                        return reply("unsupported", "이 자료에는 검증된 인구 합계 연산이 없습니다. ‘용인시 인구 분포 분석해줘’로 확인해 주세요.")
                     simple_count = _basic_count(question, selected)
                     columns = {} if simple_count else _validated_columns(cur, selected, backend)
                     plan = ({"dataset_id": selected["dataset_id"], "operation": "count",
@@ -640,12 +663,6 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                     if reason:
                         return reply("unsupported", reason)
                     rows = _execute(cur, plan, columns)
-                    source = {"dataset_id": selected["dataset_id"], "dataset_name": selected["display_name"],
-                              "provider": selected["provider"], "url": selected["portal_url"],
-                              "database": backend,
-                              "reference_date": str(selected["reference_date"]) if selected["reference_date"] else None,
-                              "collected_at": selected["collected_at"].isoformat() if selected["collected_at"] else None,
-                              "last_success_at": selected["last_success_at"].isoformat() if selected["last_success_at"] else None}
                     op = plan["operation"]
                     answer = describe(selected["display_name"], plan, rows)
                     result = _blank("ok", answer)
