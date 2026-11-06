@@ -20,7 +20,10 @@ def test_webhook_uses_real_model_and_verified_database_result():
     forest = _ask("숲체험일정은 몇 건이야?")
     assert forest["status"] == "ok"
     assert forest["result"] == [{"count": 8830}]
-    assert forest["model_status"] == "not_used"
+    assert forest["model_status"] == "completed"
+    assert forest["ai_usage"]["question_understanding"] == "completed"
+    assert forest["workflow"]["id"] == "YNGN03QuestionAgentV1"
+    assert forest["request_id"].startswith("n8n-")
     searched = _ask("도서관 달력에서 ‘유아 클레이 특강’은 몇 건이야?")
     assert searched["status"] == "ok"
     assert searched["result"] == [{"count": 1}]

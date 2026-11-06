@@ -36,7 +36,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "const body = $input.first().json.body ?? {}; const question = typeof body.question === 'string' ? body.question.slice(0, 300) : ''; const context = body.context && typeof body.context === 'object' ? body.context : null; return [{json:{question,context}}];"
+        "jsCode": "const body = $input.first().json.body ?? {}; const question = typeof body.question === 'string' ? body.question.trim().slice(0, 300) : ''; let context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : null; if (context && JSON.stringify(context).length > 4096) context = null; const supplied = typeof body.request_id === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(body.request_id) ? body.request_id : null; const request_id = supplied ?? `n8n-${String($execution.id)}-${Date.now().toString(36)}`; const channel = typeof body.channel === 'string' && /^[A-Za-z0-9_-]{1,20}$/.test(body.channel) ? body.channel : 'web'; return [{json:{request_id,question,context,channel,received_at:new Date().toISOString()}}];"
       }
     },
     {
@@ -55,10 +55,26 @@
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ { question: $json.question, context: $json.context } }}",
+        "jsonBody": "={{ { request_id: $json.request_id, question: $json.question, context: $json.context, channel: $json.channel } }}",
         "options": {
-          "timeout": 30000
+          "timeout": 50000
         }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "4bfed992-878a-4f70-8b1b-100000000005",
+      "name": "응답 계약 정리",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        180
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const meta = $('질문 입력 검증').first().json; const value = $input.first()?.json ?? {}; const valid = value && typeof value === 'object' && ['ok','clarification','unsupported','error'].includes(value.status); const response = valid ? value : {status:'error',intent:'unknown',answer:'분석 서비스 응답을 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.',result:[],sources:[],filters:{},limitations:[],context:null,model_status:'failed',insight_status:'not_used',pipeline:[]}; response.request_id = response.request_id ?? meta.request_id; response.workflow = {id:'YNGN03QuestionAgentV1',received_at:meta.received_at}; return [{json:response}];"
       }
     },
     {
@@ -67,7 +83,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        720,
+        960,
         180
       ],
       "parameters": {
@@ -101,6 +117,17 @@
       ]
     },
     "허용된 분석 조회 실행": {
+      "main": [
+        [
+          {
+            "node": "응답 계약 정리",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "응답 계약 정리": {
       "main": [
         [
           {

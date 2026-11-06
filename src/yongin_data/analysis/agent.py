@@ -25,6 +25,8 @@ from yongin_data.analysis.population import (DATASET_ID as POPULATION_DATASET_ID
                                              PopulationContractError, summarize as summarize_population,
                                              wants_population)
 from yongin_data.analysis.insights import grounded_insight
+from yongin_data.analysis.question_profile import (llm_profile, presentation_for,
+                                                    rule_profile)
 
 MAX_ROWS = 20
 MAX_GROUPS = 50
@@ -55,7 +57,8 @@ def _blank(status: str = "unsupported", answer: str = "") -> dict[str, Any]:
     return {"request_id": uuid.uuid4().hex, "status": status, "intent": "unknown", "answer": answer,
             "filters": {}, "result": [], "visualization": None, "sources": [],
             "calculation": None, "limitations": [], "interpreter": "rules", "context": None,
-            "model_status": "not_used", "insight": None, "insight_status": "not_used"}
+            "model_status": "not_used", "insight": None, "insight_status": "not_used",
+            "question_understanding": None, "presentation": None, "ai_usage": {}, "pipeline": []}
 
 
 def _database_identity(cur) -> tuple:
@@ -405,7 +408,7 @@ def _llm_select(question: str, catalog: list[dict], context: dict | None,
                     "모호한 경우 실제로 관련 있는 후보 ID를 최대 5개 candidate_ids에 적는다. "
                     "기존 문맥은 '그중에서' 같은 명시적 후속 질문에만 사용한다. "
                     f"허용 자료 목록: {names}. 직전 자료 ID: {(context or {}).get('dataset_id')}.")
-    return _model_json(question, instructions, schema, "dataset_selection", api_key)
+    return _model_json(question, instructions, schema, "dataset_selection", api_key, timeout_seconds=15)
 
 
 def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
@@ -430,7 +433,7 @@ def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
                     "기간 조건이나 월별·연도별 집계가 없으면 date_field도 null로 둔다. "
                     f"선택된 자료: {selected['dataset_id']} / {selected['display_name']}. "
                     f"검증된 컬럼과 값: {columns}. 직전 검증 문맥: {context}.")
-    return _model_json(question, instructions, schema, "yongin_plan", api_key)
+    return _model_json(question, instructions, schema, "yongin_plan", api_key, timeout_seconds=15)
 
 
 def _validate(plan: dict, selected: dict, columns: dict) -> str | None:
@@ -546,30 +549,76 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
     settings = get_settings()
     model_key = api_key if api_key is not None else settings.openai_api_key
     model_status = "not_used"
+    profile = rule_profile(question)
+    ai_usage = {"question_understanding": profile["model_status"], "dataset_selection": "not_used",
+                "query_plan": "not_used", "result_interpretation": "not_used"}
+    if model_key:
+        try:
+            profile = llm_profile(question, model_key, _model_json)
+            ai_usage["question_understanding"] = "completed"
+            model_status = "completed"
+        except httpx.HTTPError:
+            profile["model_status"] = "failed"
+            ai_usage["question_understanding"] = "failed"
+            model_status = "failed"
+        except (ValueError, KeyError, TypeError):
+            profile["model_status"] = "rejected"
+            ai_usage["question_understanding"] = "rejected"
+            model_status = "rejected"
+
+    def finalize(result: dict) -> dict:
+        result["question_understanding"] = {key: profile[key] for key in
+                                            ("goal", "output_format", "detail", "semantic_summary")}
+        result["ai_usage"] = ai_usage.copy()
+        result["model_status"] = model_status
+        if result.get("status") == "ok":
+            presentation, limitation = presentation_for(result.get("intent", "unknown"), profile)
+            result["presentation"] = presentation
+            if limitation and limitation not in result["limitations"]:
+                result["limitations"].append(limitation)
+        result["pipeline"] = [
+            {"stage": "question_understanding", "actor": "llm" if ai_usage["question_understanding"] == "completed" else "rules",
+             "status": ai_usage["question_understanding"]},
+            {"stage": "dataset_selection", "actor": "llm" if ai_usage["dataset_selection"] == "completed" else "server",
+             "status": ai_usage["dataset_selection"]},
+            {"stage": "query_plan", "actor": "llm" if ai_usage["query_plan"] == "completed" else "server",
+             "status": ai_usage["query_plan"]},
+            {"stage": "calculation", "actor": "database_python",
+             "status": "completed" if result.get("status") == "ok" and result.get("calculation") else "not_run"},
+            {"stage": "result_interpretation", "actor": "llm",
+             "status": ai_usage["result_interpretation"]},
+        ]
+        return result
+
     def add_insight(result: dict) -> dict:
+        nonlocal model_status
         if result.get("intent") not in {"population", "monthly", "yearly", "group"} or len(result.get("result", [])) < 2:
-            return result
+            return finalize(result)
         if not model_key:
             result["insight_status"] = "not_configured"
-            return result
+            ai_usage["result_interpretation"] = "not_configured"
+            return finalize(result)
         try:
             result["insight"] = grounded_insight(question, result["intent"], result["result"],
                                                   model_key, _model_json)
             result["insight_status"] = "completed" if result["insight"] else "no_insight"
+            ai_usage["result_interpretation"] = result["insight_status"]
+            model_status = "completed"
         except httpx.HTTPError:
             result["insight_status"] = "failed"
+            ai_usage["result_interpretation"] = "failed"
         except (ValueError, KeyError, TypeError):
             result["insight_status"] = "rejected"
-        return result
+            ai_usage["result_interpretation"] = "rejected"
+        return finalize(result)
 
     def reply(status: str, answer: str) -> dict[str, Any]:
         result = _blank(status, answer)
-        result["model_status"] = model_status
-        return result
+        return finalize(result)
     url = database_url or settings.database_url
     remote_url = supabase_database_url if supabase_database_url is not None else settings.supabase_analysis_db_url
     if not url:
-        return _blank("error", "읽기 전용 DATABASE_URL이 설정되지 않았습니다.")
+        return finalize(_blank("error", "읽기 전용 DATABASE_URL이 설정되지 않았습니다."))
     try:
         with ExitStack() as stack:
             conn = stack.enter_context(psycopg.connect(url, connect_timeout=5, row_factory=dict_row))
@@ -593,12 +642,17 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                     if re.search(r"어떤 데이터|데이터셋|자료 목록|데이터 목록", question):
                         result = _blank("ok", f"적재된 용인 관련 공공데이터 {len(catalog)}종입니다.")
                         result.update(intent="catalog", result=[{"dataset_id": x["dataset_id"], "dataset_name": x["display_name"]} for x in catalog])
-                        return result
+                        ai_usage["dataset_selection"] = "catalog"
+                        ai_usage["query_plan"] = "rules"
+                        return finalize(result)
                     selected, tied = _choose(question, catalog, context)
+                    if selected or tied:
+                        ai_usage["dataset_selection"] = "rules"
                     if not selected and model_key and not (context or {}).get("selection_id"):
                         try:
                             choices = tied if tied else catalog
                             choice = _llm_select(question, choices, context, model_key)
+                            ai_usage["dataset_selection"] = "completed"
                             model_status = "completed"
                             if not choice.get("needs_clarification"):
                                 selected = next((x for x in choices if x["dataset_id"] == choice.get("dataset_id")), None)
@@ -608,16 +662,14 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                                 candidate_ids = set(choice.get("candidate_ids", [])[:5])
                                 tied = [x for x in choices if x["dataset_id"] in candidate_ids][:5]
                         except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                            model_status = "failed"
+                            ai_usage["dataset_selection"] = "failed"
                     if tied:
                         result = _blank("clarification", "자료를 하나 선택해 주세요: " + ", ".join(x["display_name"] for x in tied))
                         result["result"] = [{"dataset_id": x["dataset_id"], "dataset_name": x["display_name"]} for x in tied]
-                        result["model_status"] = model_status
-                        return result
+                        return finalize(result)
                     if not selected:
                         result = _blank("clarification", "자료명을 특정해 주세요. ‘어떤 데이터가 있어?’로 목록을 볼 수 있습니다.")
-                        result["model_status"] = model_status
-                        return result
+                        return finalize(result)
                     backend = backends[selected["dataset_id"]]
                     if backend == "supabase":
                         if remote_cur is None:
@@ -634,6 +686,7 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                               "collected_at": selected["collected_at"].isoformat() if selected["collected_at"] else None,
                               "last_success_at": selected["last_success_at"].isoformat() if selected["last_success_at"] else None}
                     if selected["dataset_id"] == POPULATION_DATASET_ID and wants_population(question):
+                        ai_usage["query_plan"] = "validated_population_contract"
                         try:
                             population = summarize_population(cur, question, source["reference_date"])
                         except PopulationContractError as exc:
@@ -654,6 +707,7 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                              "filter_field": None, "filter_value": None, "group_field": None}
                             if simple_count else _rule_plan(question, selected, columns, context))
                     interpreter = "rules"
+                    ai_usage["query_plan"] = "rules"
                     if model_key and not simple_count:
                         try:
                             candidate = _llm_plan(question, catalog, selected, columns, context, model_key)
@@ -661,11 +715,12 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                                     _validate_question_alignment(candidate, question, selected, context)):
                                 plan = candidate
                                 interpreter = "llm"
+                                ai_usage["query_plan"] = "completed"
                                 model_status = "completed"
                             else:
-                                model_status = "rejected"
+                                ai_usage["query_plan"] = "rejected"
                         except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                            model_status = "failed"
+                            ai_usage["query_plan"] = "failed"
                     plan = _inherit_verified_context(plan, question, selected, columns, context)
                     if (plan["operation"] == "records" and not re.search(r"보여줘|목록|원본|행|찾아줘|검색", question)
                             and not plan.get("keyword")):

@@ -33,7 +33,7 @@ def record_frame(rows: list[dict]) -> pd.DataFrame:
     return frame.map(lambda value: str(value)[:160] + "…" if len(str(value)) > 160 else value)
 
 
-def result_chart(rows: list[dict], intent: str) -> None:
+def result_chart(rows: list[dict], intent: str, output_format: str = "bar_chart") -> None:
     frame = pd.DataFrame(rows)
     if frame.empty or "count" not in frame:
         return
@@ -41,29 +41,42 @@ def result_chart(rows: list[dict], intent: str) -> None:
     if key not in frame:
         return
     frame[key] = frame[key].astype(str).str[:10]
-    st.bar_chart(frame.set_index(key)["count"], height=300)
-    with st.expander("집계표 보기"):
-        frame = frame.rename(columns={key: "기간" if key == "period" else "분류", "count": "건수"})
+    chart_frame = frame.set_index(key)["count"]
+    if output_format == "line_chart":
+        st.line_chart(chart_frame, height=300)
+    elif output_format == "bar_chart":
+        st.bar_chart(chart_frame, height=300)
+    frame = frame.rename(columns={key: "기간" if key == "period" else "분류", "count": "건수"})
+    if output_format == "table":
         st.dataframe(frame, hide_index=True, width="stretch")
+    elif output_format != "text":
+        with st.expander("집계표 보기"):
+            st.dataframe(frame, hide_index=True, width="stretch")
 
 
-def population_chart(rows: list[dict], visualization: dict, filters: dict) -> None:
+def population_chart(rows: list[dict], visualization: dict, filters: dict,
+                     output_format: str = "bar_chart") -> None:
     frame = pd.DataFrame(rows).set_index("district")
     if "count" in frame:
         title = filters.get("metric", "인구")
-        st.bar_chart(frame.rename(columns={"count": f"{title} (명)"}), height=310)
+        chart = frame.rename(columns={"count": f"{title} (명)"})
         table = frame.rename_axis("구").rename(columns={"count": "인구 수 (명)"})
     else:
         labelled = frame.rename(columns=POPULATION_LABELS)
-        st.bar_chart(labelled[["청년 19~34세", "고령자 65세 이상"]], height=310)
+        chart = labelled[["청년 19~34세", "고령자 65세 이상"]]
         table = labelled.rename_axis("구")
-    with st.expander("구별 인구 수 보기"):
+    if output_format == "bar_chart":
+        st.bar_chart(chart, height=310)
+    if output_format == "table":
         st.dataframe(table.style.format("{:,.0f}"), width="stretch")
+    elif output_format != "text":
+        with st.expander("구별 인구 수 보기"):
+            st.dataframe(table.style.format("{:,.0f}"), width="stretch")
 
 
 def ask(question: str, context: dict | None) -> dict:
     try:
-        response = requests.post(WEBHOOK, json={"question": question, "context": context}, timeout=35)
+        response = requests.post(WEBHOOK, json={"question": question, "context": context, "channel": "web"}, timeout=60)
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict) or data.get("status") not in {"ok", "clarification", "unsupported", "error"}:
@@ -123,15 +136,19 @@ for index, message in enumerate(st.session_state.messages):
                     chosen_label = f"자료 선택: {row['dataset_name']}"
         elif rows:
             intent = message.get("intent")
+            output_format = (message.get("presentation") or {}).get("format", "auto")
+            if output_format == "auto":
+                output_format = ("line_chart" if intent in {"monthly", "yearly"} else
+                                 "bar_chart" if intent in {"group", "population"} else "table")
             if intent in {"count", "overview"}:
                 st.metric("기록 수", f"{rows[0]['count']:,}건")
             elif intent in {"monthly", "yearly", "group"}:
-                result_chart(rows, intent)
+                result_chart(rows, intent, output_format)
             elif intent == "population":
-                population_chart(rows, message.get("visualization") or {}, message.get("filters") or {})
+                population_chart(rows, message.get("visualization") or {}, message.get("filters") or {}, output_format)
             elif intent == "records":
                 frame = record_frame(rows)
-                if not frame.empty:
+                if not frame.empty and output_format != "text":
                     st.dataframe(frame, hide_index=True, width="stretch", height=min(520, 75 + len(frame) * 35))
             elif intent == "catalog":
                 frame = pd.DataFrame(rows)
@@ -147,6 +164,15 @@ for index, message in enumerate(st.session_state.messages):
         elif message.get("intent") in {"population", "monthly", "yearly", "group"} and message.get("insight_status") in {
                 "failed", "rejected", "not_configured"}:
             st.caption("AI 해석 없이 DB 계산 결과를 표시했습니다.")
+
+        understanding = message.get("question_understanding") or {}
+        pipeline = message.get("pipeline") or []
+        if understanding or pipeline:
+            with st.expander("질문 이해 및 분석 과정"):
+                if understanding.get("semantic_summary"):
+                    st.write(understanding["semantic_summary"])
+                for step in pipeline:
+                    st.caption(f"{step['stage']} · {step['actor']} · {step['status']}")
 
         if status == "ok" and message.get("suggested_questions"):
             with st.container():
@@ -187,6 +213,8 @@ if question_to_send:
          "question": question_to_send, "status": data["status"], "intent": data.get("intent"),
          "result": data.get("result", []), "sources": data.get("sources", []),
          "visualization": data.get("visualization"),
+         "presentation": data.get("presentation"), "question_understanding": data.get("question_understanding"),
+         "pipeline": data.get("pipeline", []),
          "calculation": data.get("calculation"), "filters": data.get("filters", {}),
          "interpreter": data.get("interpreter", "rules"), "model_status": data.get("model_status"),
          "insight": data.get("insight"), "insight_status": data.get("insight_status", "not_used"),

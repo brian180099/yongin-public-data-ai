@@ -69,6 +69,8 @@ def test_population_result_renders_person_chart_not_record_metric():
         "visualization": {"type": "population", "metrics": ["youth"], "unit": "명"},
         "filters": {"metric": "청년"}, "limitations": ["연령 구간을 더해 전체 인구로 쓰지 않습니다."],
         "insight": "기흥구가 처인구보다 1명 많습니다.", "insight_status": "completed",
+        "question_understanding": {"semantic_summary": "구별 청년 인구 비교"},
+        "pipeline": [{"stage": "question_understanding", "actor": "llm", "status": "completed"}],
     }
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
     with patch("requests.post", return_value=response):
@@ -77,3 +79,19 @@ def test_population_result_renders_person_chart_not_record_metric():
     assert not app.metric
     assert any(expander.label == "구별 인구 수 보기" for expander in app.expander)
     assert any("AI 분석" in item.value for item in app.markdown)
+    assert any(expander.label == "질문 이해 및 분석 과정" for expander in app.expander)
+
+
+def test_requested_table_is_rendered_without_chart_expander():
+    response = Mock()
+    response.json.return_value = {
+        "status": "ok", "answer": "월별 집계", "intent": "monthly",
+        "result": [{"period": "2025-01-01", "count": 2}, {"period": "2025-02-01", "count": 5}],
+        "presentation": {"requested": "table", "format": "table", "detail": "normal"},
+    }
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+    with patch("requests.post", return_value=response):
+        app.button[0].click().run()
+    assert not app.exception
+    assert len(app.dataframe) == 1
+    assert not any(expander.label == "집계표 보기" for expander in app.expander)
