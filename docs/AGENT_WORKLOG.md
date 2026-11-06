@@ -126,3 +126,11 @@ Claude Code와 Codex가 이 저장소에서 수행한 작업을 시간순으로 
 - **커밋**: 기능 `9ff6341`; 이 기록은 별도 커밋.
 - **검증**: 실제 DB·OpenAI·n8n Webhook을 포함한 전체 테스트 51개 통과. 인구 및 월별 결과에서 실제 OpenAI가 선택한 비교를 서버가 검증한 `insight_status=completed`를 확인했다. 잘못 고른 최대 지역은 거절되지만 DB 계산 답변은 유지되는 테스트를 통과했다. 컨테이너 재빌드 후 웹 HTTP 200, n8n 인구 질문의 `insight_status=completed` 및 청년 208,775명을 확인했다. Streamlit 자동 테스트로 `AI 분석` 표시를 확인했다.
 - **다음 작업자에게**: AI 해석은 현재 검증 가능한 최대·최소·두 항목 차이만 허용한다. 원인 추론·예측·외부 지식 결합은 하지 않는다. 결과 차트와 설명의 중복을 줄이고 더 풍부한 분석을 하려면 수치 컬럼 계약과 검증 가능한 통계 연산을 먼저 늘릴 것.
+
+## 2026-11-06 14:54 · Codex
+
+- **요약**: 모든 정상 자연어 질문을 OpenAI 엄격한 JSON Schema로 질문 목표·출력 형식·설명 길이로 구조화하고, 복잡한 질문만 자료 선택·조회 계획에 LLM을 추가 사용하도록 역할을 분리했다. 모델 출력은 서버 허용 계약으로 다시 검증하고, 숫자·집계·차이는 읽기 전용 DB/Python이만 계산하도록 유지했다. 웹에서 표·선/막대 차트·텍스트 요청을 반영하고 질문 이해와 LLM/서버/DB 단계를 표시했다. n8n은 요청 ID·입력/문맥 제한·오류 응답 계약만 담당하도록 갱신했고, 구 Webhook과 구 분석 컨테이너를 비활성/중지한 단일 응답 경로를 재확인했다.
+- **변경 파일**: `src/yongin_data/analysis/question_profile.py`, `agent.py`, `api.py`, `app.py`, `workflows/n8n/yongin-question-agent-v1.json`, `tests/test_question_profile.py`, `tests/test_api.py`, `tests/test_agent_openai_live.py`, `tests/test_webhook_live.py`, `tests/test_web_ui.py`, `docs/ANALYSIS_ARCHITECTURE.md`, `docs/COLLECTOR_HANDOFF_PROMPT.md`, `README.md`, `docs/AGENT_WORKLOG.md`.
+- **커밋**: 기능 `0eba0d0`; 이 작업 기록은 별도 커밋.
+- **검증**: 기본 테스트 40개 통과, 실제 로컬 PostgreSQL·OpenAI·n8n을 포함한 전체 57개 통과. 웹 HTTP 200, API `status=ok`·역할 목록, 구 Webhook HTTP 404, 신규 `YNGN03QuestionAgentV1` 응답의 요청 ID·워크플로 ID·AI 단계를 확인했다. `yongin-analysis`는 `Exited`, 신규 웹/API·n8n·로컬 DB는 실행 상태다. 비밀 패턴과 `git diff --check`도 통과했다.
+- **다음 작업자에게**: 수집 저장소는 `docs/COLLECTOR_HANDOFF_PROMPT.md`를 기준으로 구 분석 런타임을 격리하고 분석 용 수집 버전 계약만 제공할 것. 본 서비스의 다음 확장은 검증된 숫자 컬럼의 합계·평균·상위 N, 임의 날짜 범위, 다중 자료 결합이며 컬럼 계약 없이 열지 말 것.
