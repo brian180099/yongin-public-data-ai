@@ -56,7 +56,17 @@ def test_population_distribution_uses_verified_person_sums():
     assert {row["district"]: row["count"] for row in result["result"]} == {
         "기흥구": 85210, "수지구": 68070, "처인구": 55495}
     assert result["calculation"]["measure"] == "검증된 인구 수치 합계"
+    assert result["insight_status"] == "not_configured"
     assert analyze("용인시 인구및세대 현황은 몇 명이야?", api_key="")["status"] == "unsupported"
+
+
+def test_invalid_model_insight_does_not_change_db_answer(monkeypatch):
+    monkeypatch.setattr(agent, "_model_json", lambda *_args, **_kwargs: {
+        "kind": "largest", "metric": "count", "first": "처인구", "second": None})
+    result = analyze("용인시 청년 인구를 구별로 비교해줘", api_key="test-key")
+    assert result["status"] == "ok" and result["intent"] == "population"
+    assert result["insight_status"] == "rejected" and result["insight"] is None
+    assert sum(row["count"] for row in result["result"]) == 208775
 
 
 def test_live_supabase_backend_uses_read_only_source(monkeypatch):

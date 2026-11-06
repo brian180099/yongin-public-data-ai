@@ -50,3 +50,4 @@ def test_webhook_population_uses_person_counts():
     assert result["status"] == "ok" and result["intent"] == "population"
     assert sum(row["count"] for row in result["result"]) == 208775
     assert result["visualization"]["unit"] == "명"
+    assert result["insight_status"] == "completed" and result["insight"]

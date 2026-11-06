@@ -142,6 +142,12 @@ for index, message in enumerate(st.session_state.messages):
                 st.dataframe(frame.rename(columns={"dataset_name": "자료명", "dataset_id": "자료 ID"}),
                              hide_index=True, width="stretch", height=390)
 
+        if message.get("insight_status") == "completed" and message.get("insight"):
+            st.markdown(f"**AI 분석** · {message['insight']}")
+        elif message.get("intent") in {"population", "monthly", "yearly", "group"} and message.get("insight_status") in {
+                "failed", "rejected", "not_configured"}:
+            st.caption("AI 해석 없이 DB 계산 결과를 표시했습니다.")
+
         if status == "ok" and message.get("suggested_questions"):
             with st.container():
                 for suggestion_index, suggestion in enumerate(message["suggested_questions"]):
@@ -183,6 +189,7 @@ if question_to_send:
          "visualization": data.get("visualization"),
          "calculation": data.get("calculation"), "filters": data.get("filters", {}),
          "interpreter": data.get("interpreter", "rules"), "model_status": data.get("model_status"),
+         "insight": data.get("insight"), "insight_status": data.get("insight_status", "not_used"),
          "suggested_questions": data.get("suggested_questions", []),
          "limitations": data.get("limitations", [])},
     ])

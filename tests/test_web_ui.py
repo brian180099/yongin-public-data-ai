@@ -68,6 +68,7 @@ def test_population_result_renders_person_chart_not_record_metric():
                    {"district": "처인구", "count": 4}],
         "visualization": {"type": "population", "metrics": ["youth"], "unit": "명"},
         "filters": {"metric": "청년"}, "limitations": ["연령 구간을 더해 전체 인구로 쓰지 않습니다."],
+        "insight": "기흥구가 처인구보다 1명 많습니다.", "insight_status": "completed",
     }
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
     with patch("requests.post", return_value=response):
@@ -75,3 +76,4 @@ def test_population_result_renders_person_chart_not_record_metric():
     assert not app.exception
     assert not app.metric
     assert any(expander.label == "구별 인구 수 보기" for expander in app.expander)
+    assert any("AI 분석" in item.value for item in app.markdown)

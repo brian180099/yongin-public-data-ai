@@ -24,6 +24,7 @@ from yongin_data.analysis.presentation import describe, suggestions
 from yongin_data.analysis.population import (DATASET_ID as POPULATION_DATASET_ID,
                                              PopulationContractError, summarize as summarize_population,
                                              wants_population)
+from yongin_data.analysis.insights import grounded_insight
 
 MAX_ROWS = 20
 MAX_GROUPS = 50
@@ -54,7 +55,7 @@ def _blank(status: str = "unsupported", answer: str = "") -> dict[str, Any]:
     return {"request_id": uuid.uuid4().hex, "status": status, "intent": "unknown", "answer": answer,
             "filters": {}, "result": [], "visualization": None, "sources": [],
             "calculation": None, "limitations": [], "interpreter": "rules", "context": None,
-            "model_status": "not_used"}
+            "model_status": "not_used", "insight": None, "insight_status": "not_used"}
 
 
 def _database_identity(cur) -> tuple:
@@ -369,9 +370,10 @@ def _inherit_verified_context(plan: dict, question: str, selected: dict,
     return plan
 
 
-def _model_json(question: str, instructions: str, schema: dict, name: str, api_key: str) -> dict:
+def _model_json(question: str, instructions: str, schema: dict, name: str, api_key: str,
+                *, timeout_seconds: int = 30) -> dict:
     """Ask for data only; never accept executable SQL or a model-written answer."""
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=timeout_seconds) as client:
         response = client.post("https://api.openai.com/v1/responses",
             headers={"Authorization": f"Bearer {api_key}"},
             json={"model": get_settings().openai_model, "instructions": instructions,
@@ -544,6 +546,22 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
     settings = get_settings()
     model_key = api_key if api_key is not None else settings.openai_api_key
     model_status = "not_used"
+    def add_insight(result: dict) -> dict:
+        if result.get("intent") not in {"population", "monthly", "yearly", "group"} or len(result.get("result", [])) < 2:
+            return result
+        if not model_key:
+            result["insight_status"] = "not_configured"
+            return result
+        try:
+            result["insight"] = grounded_insight(question, result["intent"], result["result"],
+                                                  model_key, _model_json)
+            result["insight_status"] = "completed" if result["insight"] else "no_insight"
+        except httpx.HTTPError:
+            result["insight_status"] = "failed"
+        except (ValueError, KeyError, TypeError):
+            result["insight_status"] = "rejected"
+        return result
+
     def reply(status: str, answer: str) -> dict[str, Any]:
         result = _blank(status, answer)
         result["model_status"] = model_status
@@ -626,7 +644,7 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                                       calculation=population["calculation"], limitations=population["limitations"],
                                       suggested_questions=population["suggested_questions"], sources=[source],
                                       model_status=model_status, context={"dataset_id": selected["dataset_id"]})
-                        return result
+                        return add_insight(result)
                     if re.search(r"몇\s*명|인구.*(?:구별|분포|비교)", question):
                         return reply("unsupported", "이 자료에는 검증된 인구 합계 연산이 없습니다. ‘용인시 인구 분포 분석해줘’로 확인해 주세요.")
                     simple_count = _basic_count(question, selected)
@@ -676,7 +694,7 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                                               (["표시 항목이 50개 제한에 도달해 뒤의 항목이 생략됐을 수 있습니다."]
                                                if op in {"monthly", "yearly", "group"} and len(rows) >= MAX_GROUPS else []),
                                   context={k: plan.get(k) for k in ("dataset_id", "keyword", "year", "month", "date_field", "filter_field", "filter_value")})
-                    return result
+                    return add_insight(result)
     except psycopg.errors.QueryCanceled:
         return reply("unsupported", "자료가 커서 제한 시간 5초 안에 검증·집계를 마치지 못했습니다. 자료나 조건을 더 좁혀 주세요.")
     except (psycopg.Error, PoolClosed, PoolTimeout):
