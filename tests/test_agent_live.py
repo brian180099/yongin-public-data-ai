@@ -41,6 +41,14 @@ def test_live_followup_keeps_verified_year_and_dataset():
     assert followup["sources"][0]["dataset_id"] == first["sources"][0]["dataset_id"]
 
 
+def test_selected_ambiguous_dataset_opens_overview():
+    question = "기흥구 이벤트 정보"
+    result = analyze(question, context={"selection_id": "giheung_events", "pending_question": question}, api_key="")
+    assert result["status"] == "ok"
+    assert result["intent"] == "overview"
+    assert result["result"][0]["count"] > 0
+
+
 def test_live_supabase_backend_uses_read_only_source(monkeypatch):
     if not get_settings().supabase_analysis_db_url:
         pytest.skip("read-only Supabase DSN not configured")

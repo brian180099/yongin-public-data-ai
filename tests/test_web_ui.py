@@ -6,6 +6,7 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 
+
 def test_example_question_shows_count_and_source():
     response = Mock()
     response.json.return_value = {
@@ -29,3 +30,31 @@ def test_example_question_shows_count_and_source():
     assert app.session_state.context == {"dataset_id": "forest"}
     assert any("숲체험일정 정보" in item.value for item in app.markdown)
     assert post.call_args.kwargs["json"]["question"] == "숲체험일정은 몇 건이야?"
+
+
+def test_record_payload_is_flattened_for_display():
+    response = Mock()
+    response.json.return_value = {"status": "ok", "answer": "기록 1건", "intent": "records",
+                                  "result": [{"payload": {"제목": "용인 행사", "시작일": "2025-01-01"}}]}
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+    with patch("requests.post", return_value=response):
+        app.button[0].click().run()
+    assert not app.exception
+    frame = app.dataframe[0].value
+    assert frame.columns.tolist() == ["제목", "시작일"]
+    assert frame.iloc[0]["제목"] == "용인 행사"
+
+
+def test_monthly_result_renders_chart_and_followup_buttons():
+    response = Mock()
+    response.json.return_value = {
+        "status": "ok", "answer": "월별 집계 7건", "intent": "monthly",
+        "result": [{"period": "2025-01-01", "count": 2}, {"period": "2025-02-01", "count": 5}],
+        "suggested_questions": ["숲체험일정은 몇 건이야?"],
+    }
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "app.py").run()
+    with patch("requests.post", return_value=response):
+        app.button[0].click().run()
+    assert not app.exception
+    assert any(expander.label == "집계표 보기" for expander in app.expander)
+    assert any("숲체험일정은 몇 건이야?" == button.label for button in app.button)

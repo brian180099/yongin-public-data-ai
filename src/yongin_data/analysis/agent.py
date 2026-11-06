@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from yongin_data.config import get_settings
+from yongin_data.analysis.presentation import describe, suggestions
 
 MAX_ROWS = 20
 MAX_GROUPS = 50
@@ -191,6 +192,16 @@ def _basic_count(question: str, selected: dict) -> bool:
         r"(알려줘|보여줘)?", remainder))
 
 
+def _explicit_district(question: str, selected: dict) -> str | None:
+    """A district in the dataset title is not a user requested row filter."""
+    remainder = question
+    title = selected.get("display_name", "")
+    for part in (title, title.split(" / ")[-1], title.split("_")[-1]):
+        if part:
+            remainder = remainder.replace(part, "")
+    return next((district for district in ("처인구", "기흥구", "수지구") if district in remainder), None)
+
+
 def _safe_context(context: dict | None) -> dict | None:
     if not isinstance(context, dict):
         return None
@@ -306,7 +317,7 @@ def _rule_plan(question: str, selected: dict, columns: dict, context: dict | Non
     date_fields = [k for k, v in columns.items() if v["kind"] == "date"]
     date_field = next((k for k in date_fields if "시작" in k), date_fields[0] if len(date_fields) == 1 else None)
     group_fields = [k for k, v in columns.items() if v["kind"] == "group"]
-    district = next((d for d in ("처인구", "기흥구", "수지구") if d in question), None)
+    district = _explicit_district(question, selected)
     filter_field = next((k for k in group_fields if district and district in columns[k]["values"]), None)
     filter_value = district
     if not filter_field:
@@ -327,8 +338,10 @@ def _rule_plan(question: str, selected: dict, columns: dict, context: dict | Non
         op = "group"
     elif re.search(r"몇|건수|개수|총|전체", question) or keyword or year or month or district:
         op = "count"
-    else:
+    elif re.search(r"보여줘|목록|원본|행|찾아줘|검색", question):
         op = "records"
+    else:
+        op = "overview"
     return {"dataset_id": selected["dataset_id"], "operation": op, "keyword": keyword,
             "year": year, "month": month, "date_field": date_field,
             "filter_field": filter_field, "filter_value": filter_value, "group_field": group_field}
@@ -394,7 +407,7 @@ def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
               context: dict | None, api_key: str) -> dict:
     schema = {"type": "object", "additionalProperties": False, "properties": {
         "dataset_id": {"type": "string", "enum": [selected["dataset_id"]]},
-        "operation": {"type": "string", "enum": ["count", "records", "monthly", "yearly", "group", "unsupported"]},
+        "operation": {"type": "string", "enum": ["overview", "count", "records", "monthly", "yearly", "group", "unsupported"]},
         "keyword": {"type": ["string", "null"]}, "year": {"type": ["integer", "null"]},
         "month": {"type": ["integer", "null"]},
         "date_field": {"type": ["string", "null"]},
@@ -404,7 +417,8 @@ def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
                      "filter_field", "filter_value", "group_field"]}
     instructions = ("질문을 조회 계획으로만 변환한다. SQL이나 답변 문장을 작성하지 않는다. "
                     "날짜·그룹 조건은 검증된 컬럼만 사용한다. 불명확한 조건은 unsupported. "
-                    "전체 건수로 조건을 바꾸지 않는다. 등록 현황을 운영 중 또는 예약 가능으로 추정하지 않는다. "
+                    "전체 건수로 조건을 바꾸지 않는다. 자료만 선택하고 계산 요청이 없으면 overview. "
+                    "원본 기록 조회를 명시적으로 요청했을 때만 records. 등록 현황을 운영 중 또는 예약 가능으로 추정하지 않는다. "
                     "따옴표 안의 문구는 keyword로만 사용하고 그 안의 단어를 분류 조건으로 추가하지 않는다. "
                     "자료명 자체를 keyword로 다시 검색하지 않는다. 별도 검색어가 없으면 keyword=null. "
                     "명시적 분류 조건이 없으면 filter_field와 filter_value를 둘 다 null로 둔다. "
@@ -417,7 +431,7 @@ def _llm_plan(question: str, catalog: list[dict], selected: dict, columns: dict,
 def _validate(plan: dict, selected: dict, columns: dict) -> str | None:
     if plan.get("dataset_id") != selected["dataset_id"]:
         return "자료 선택을 확인할 수 없습니다. 자료명을 다시 지정해 주세요."
-    if plan.get("operation") not in {"count", "records", "monthly", "yearly", "group"}:
+    if plan.get("operation") not in {"overview", "count", "records", "monthly", "yearly", "group"}:
         return "이 질문 유형은 아직 지원하지 않습니다."
     if bool(plan.get("filter_field")) != bool(plan.get("filter_value")):
         return "조건 컬럼과 조건 값은 함께 지정해야 합니다."
@@ -497,7 +511,7 @@ def _execute(cur, plan: dict, columns: dict) -> list[dict]:
             args.extend([plan["date_field"], fmt, plan["month"]])
     base = " from analytics.current_dataset_records where " + " and ".join(where)
     op = plan["operation"]
-    if op == "count":
+    if op in {"count", "overview"}:
         cur.execute("select count(*)::int as count" + base, args)
     elif op == "records":
         cur.execute("select payload" + base + " and octet_length(payload::text) <= 4096 order by record_key limit %s", args + [MAX_ROWS])
@@ -612,12 +626,15 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                         except (httpx.HTTPError, ValueError, KeyError, TypeError):
                             model_status = "failed"
                     plan = _inherit_verified_context(plan, question, selected, columns, context)
+                    if (plan["operation"] == "records" and not re.search(r"보여줘|목록|원본|행|찾아줘|검색", question)
+                            and not plan.get("keyword")):
+                        plan["operation"] = "overview"
                     # Rules do not silently reinterpret unsupported qualifiers.
                     if re.search(r"오늘|내일|이번|지난|다음|현재|예약|운영 중|평균|합계|순위|가장|추세|부터|까지", question):
                         return reply("unsupported", "현재 운영 상태·예약 가능 여부·범위/순위/평균 분석은 검증된 계약이 없어 지원하지 않습니다.")
                     if re.search(r"\d{4}년", question) and plan.get("year") is None:
                         return reply("unsupported", "연도 조건을 해석하지 못했습니다.")
-                    if any(d in question for d in ("처인구", "기흥구", "수지구")) and not plan.get("filter_field"):
+                    if _explicit_district(question, selected) and not plan.get("filter_field"):
                         return reply("unsupported", "이 자료에 검증된 구 컬럼이 없어 지역 조건을 적용할 수 없습니다.")
                     reason = _validate(plan, selected, columns)
                     if reason:
@@ -630,13 +647,11 @@ def analyze(question: str, *, context: dict | None = None, database_url: str | N
                               "collected_at": selected["collected_at"].isoformat() if selected["collected_at"] else None,
                               "last_success_at": selected["last_success_at"].isoformat() if selected["last_success_at"] else None}
                     op = plan["operation"]
-                    total = rows[0]["count"] if op == "count" else sum(r.get("count", 0) for r in rows) if op != "records" else len(rows)
-                    answer = (f"{selected['display_name']}: 조건에 맞는 적재 행 {total:,}건입니다." if op == "count" else
-                              f"{selected['display_name']}: {op} 결과 {len(rows)}개 항목, 표시된 항목의 합계 {total:,}건입니다." if op != "records" else
-                              f"{selected['display_name']}: 원본 행 {len(rows)}건을 표시합니다(최대 {MAX_ROWS}건).")
+                    answer = describe(selected["display_name"], plan, rows)
                     result = _blank("ok", answer)
                     result.update(intent=op, filters={k: v for k, v in plan.items() if k != "dataset_id" and v is not None},
                                   result=rows, sources=[source], interpreter=interpreter,
+                                  suggested_questions=suggestions(selected["display_name"], columns),
                                   model_status=model_status,
                                   calculation={"measure": "현재 활성 적재 행 수", "method": op, "date_field": plan.get("date_field")},
                                   limitations=["등록 현황은 실제 운영 중·예약 가능·현재 행사를 뜻하지 않습니다."] +

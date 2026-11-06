@@ -16,8 +16,31 @@ EXAMPLES = (
 )
 FILTER_LABELS = {"keyword": "검색어", "year": "연도", "month": "월", "date_field": "날짜 기준",
                  "filter_field": "조건 컬럼", "filter_value": "조건 값", "group_field": "비교 기준"}
-OP_LABELS = {"count": "조건에 맞는 행 수", "records": "원본 행 조회", "monthly": "월별 건수",
+OP_LABELS = {"overview": "자료 개요", "count": "조건에 맞는 행 수", "records": "원본 행 조회", "monthly": "월별 건수",
              "yearly": "연도별 건수", "group": "그룹별 건수"}
+
+
+def record_frame(rows: list[dict]) -> pd.DataFrame:
+    """Show CSV fields as columns instead of a JSON payload cell."""
+    payloads = [row.get("payload", {}) for row in rows]
+    frame = pd.json_normalize(payloads, sep=" · ")
+    if frame.empty:
+        return frame
+    return frame.map(lambda value: str(value)[:160] + "…" if len(str(value)) > 160 else value)
+
+
+def result_chart(rows: list[dict], intent: str) -> None:
+    frame = pd.DataFrame(rows)
+    if frame.empty or "count" not in frame:
+        return
+    key = "period" if intent in {"monthly", "yearly"} else "category"
+    if key not in frame:
+        return
+    frame[key] = frame[key].astype(str).str[:10]
+    st.bar_chart(frame.set_index(key)["count"], height=300)
+    with st.expander("집계표 보기"):
+        frame = frame.rename(columns={key: "기간" if key == "period" else "분류", "count": "건수"})
+        st.dataframe(frame, hide_index=True, width="stretch")
 
 
 def ask(question: str, context: dict | None) -> dict:
@@ -47,10 +70,10 @@ with st.sidebar:
     st.subheader("예시 질문")
     example_clicked = None
     for example_index, example in enumerate(EXAMPLES):
-        if st.button(example, key=f"example-{example_index}", use_container_width=True):
+        if st.button(example, key=f"example-{example_index}", width="stretch"):
             example_clicked = example
     st.divider()
-    if st.button("대화 지우기", use_container_width=True):
+    if st.button("대화 지우기", width="stretch"):
         st.session_state.messages = []
         st.session_state.context = None
         st.rerun()
@@ -58,6 +81,7 @@ with st.sidebar:
 chosen_question = None
 chosen_context = None
 chosen_label = None
+suggested_question = None
 for index, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         if message["role"] == "user":
@@ -68,8 +92,8 @@ for index, message in enumerate(st.session_state.messages):
             st.error(message["content"])
         elif status == "unsupported":
             st.warning(message["content"])
-        elif message.get("intent") != "count":
-            st.write(message["content"])
+        else:
+            st.markdown(message["content"])
 
         rows = message.get("result") or []
         if status == "clarification" and rows and all("dataset_id" in row for row in rows):
@@ -80,19 +104,29 @@ for index, message in enumerate(st.session_state.messages):
                     chosen_context = {"selection_id": row["dataset_id"], "pending_question": chosen_question}
                     chosen_label = f"자료 선택: {row['dataset_name']}"
         elif rows:
-            if message.get("intent") == "count":
-                st.metric("검색 결과", f"{rows[0]['count']:,}건")
-            else:
+            intent = message.get("intent")
+            if intent in {"count", "overview"}:
+                st.metric("기록 수", f"{rows[0]['count']:,}건")
+            elif intent in {"monthly", "yearly", "group"}:
+                result_chart(rows, intent)
+            elif intent == "records":
+                frame = record_frame(rows)
+                if not frame.empty:
+                    st.dataframe(frame, hide_index=True, width="stretch", height=min(520, 75 + len(frame) * 35))
+            elif intent == "catalog":
                 frame = pd.DataFrame(rows)
-                if message.get("intent") in {"monthly", "yearly", "group"} and "count" in frame:
-                    label = "period" if "period" in frame else "category"
-                    if label in frame:
-                        st.bar_chart(frame.set_index(label)["count"])
-                if message.get("intent") == "catalog":
-                    term = st.text_input("자료 목록에서 찾기", key=f"catalog-filter-{index}")
-                    if term:
-                        frame = frame[frame["dataset_name"].str.contains(term, case=False, regex=False)]
-                st.dataframe(frame, hide_index=True, use_container_width=True, height=340)
+                term = st.text_input("자료 검색", key=f"catalog-filter-{index}")
+                if term:
+                    frame = frame[frame["dataset_name"].str.contains(term, case=False, regex=False)]
+                st.caption(f"{len(frame):,}개 자료")
+                st.dataframe(frame.rename(columns={"dataset_name": "자료명", "dataset_id": "자료 ID"}),
+                             hide_index=True, width="stretch", height=390)
+
+        if status == "ok" and message.get("suggested_questions"):
+            with st.container():
+                for suggestion_index, suggestion in enumerate(message["suggested_questions"]):
+                    if st.button(suggestion, key=f"suggest-{index}-{suggestion_index}"):
+                        suggested_question = suggestion
 
         filters = message.get("filters") or {}
         sources = message.get("sources") or []
@@ -115,7 +149,7 @@ for index, message in enumerate(st.session_state.messages):
                     st.caption(limitation)
 
 question = st.chat_input("궁금한 내용을 입력해 주세요", max_chars=300)
-question_to_send = chosen_question or example_clicked or question
+question_to_send = chosen_question or suggested_question or example_clicked or question
 if question_to_send:
     with st.spinner("자료를 찾고 있어요"):
         data = ask(question_to_send, chosen_context if chosen_question else st.session_state.context)
@@ -126,6 +160,7 @@ if question_to_send:
          "result": data.get("result", []), "sources": data.get("sources", []),
          "calculation": data.get("calculation"), "filters": data.get("filters", {}),
          "interpreter": data.get("interpreter", "rules"), "model_status": data.get("model_status"),
+         "suggested_questions": data.get("suggested_questions", []),
          "limitations": data.get("limitations", [])},
     ])
     st.session_state.messages = st.session_state.messages[-20:]
