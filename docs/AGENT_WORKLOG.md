@@ -190,3 +190,11 @@ Claude Code와 Codex가 이 저장소에서 수행한 작업을 시간순으로 
 - **커밋**: 인수인계 기록 `e9f0c48`; 이 동기화 기록은 별도 커밋.
 - **검증**: 점검 시작 시 기존 기능 커밋 `4675bf4`는 로컬과 원격이 일치했고, 작업트리에는 `docs/AGENT_WORKLOG.md` 추가 기록만 존재했다. 해당 기록을 변경 없이 커밋했고 `git diff --check`를 통과했다.
 - **다음 작업자에게**: 기능 작업 전 `main` 최신 커밋과 깨끗한 작업트리를 다시 확인할 것.
+
+## 2026-11-09 14:35 · Codex
+
+- **요약**: AWS EC2 Ubuntu에서 가상환경으로 분석 API를 실행할 때 필요한 환경변수와 `.env` 위치를 현재 코드에서 직접 확인했다.
+- **변경 파일**: `docs/AGENT_WORKLOG.md`.
+- **커밋**: 이 기록 작성 시점 미커밋.
+- **검증**: `src/yongin_data/config.py`, `.env.example`, `app.py`, `compose.analysis.yaml`, `.gitignore`를 대조했다. 직접 실행은 저장소 루트 `.env`, Docker Compose는 `.runtime/analysis-container.env`를 사용하며 두 경로 모두 Git에서 제외됨을 확인했다.
+- **다음 작업자에게**: EC2에서는 `DATABASE_URL`에 읽기 전용 PostgreSQL 계정만 사용하고, 비밀값을 쉘 기록·로그·Git에 노출하지 말 것.
