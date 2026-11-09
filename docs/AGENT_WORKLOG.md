@@ -158,3 +158,27 @@ Claude Code와 Codex가 이 저장소에서 수행한 작업을 시간순으로 
 - **커밋**: 이 기록 작성 시점 미커밋.
 - **검증**: README, 분석 구조 문서, 현황 점검, 공동 작업 로그와 대조했다. 제품명을 `공공데이터 분석 서비스`로 유지하고 용인시를 MVP 지역으로 분리했으며, 8,830건·1건·2025년 0건·청년 208,775명·57개 테스트 통과와 최근 자료 선정 회귀를 동시에 표시하도록 했다. `git diff --check`를 통과했다.
 - **다음 작업자에게**: PPT를 실제 제작할 때는 실제 웹·n8n 스크린샷을 사용하고, 최종 수치와 현재 위험은 발표 직전 실행 상태로 다시 확인할 것.
+
+## 2026-11-09 09:27 · Codex
+
+- **요약**: 사용자의 요청으로 파일 수집 프로젝트용 새 VS Code 창을 열고 `yongin-public-data-collector` 폴더 선택을 진행했으나, 사용자가 Esc 키로 컴퓨터 제어를 중단해 폴더 열기는 완료하지 않았다.
+- **변경 파일**: `docs/AGENT_WORKLOG.md`.
+- **커밋**: 미커밋.
+- **검증**: 기존 분석 프로젝트 VS Code 창을 유지한 채 비어 있는 새 VS Code 창이 열린 것까지 화면에서 확인했다. 수집 프로젝트 폴더가 실제로 열린 상태는 미검증이다.
+- **다음 작업자에게**: 새 VS Code 창의 폴더 선택 대화상자가 남아 있을 수 있다. 사용자 요청이 있으면 `C:\Users\aicam\Documents\ChatGPT\yongin-public-data-collector`를 열고 창 제목으로 완료 여부를 확인할 것.
+
+## 2026-11-09 09:28 · Codex
+
+- **요약**: 사용자가 지정한 GitHub 저장소가 로컬 `yongin-public-data-collector` 폴더의 원격 저장소와 일치함을 확인했다. 컴퓨터 제어 중단 상태가 유지되어 VS Code에서 폴더를 여는 작업은 진행하지 못했다.
+- **변경 파일**: `docs/AGENT_WORKLOG.md`.
+- **커밋**: 미커밋.
+- **검증**: 로컬 폴더 존재와 `origin=https://github.com/brian180099/yongin-public-data-collector.git`을 확인했다. 현재 브랜치는 `feat/headless-portal-keepalive`이며 원격 동명 브랜치를 추적한다. VS Code 창 제목 확인은 미완료다.
+- **다음 작업자에게**: 컴퓨터 제어가 다시 허용되면 해당 로컬 폴더를 새 VS Code 창에서 열고 창 제목이 `yongin-public-data-collector`인지 확인할 것.
+
+## 2026-11-09 09:32 · Codex
+
+- **요약**: 사용자 재요청으로 수집 저장소를 열기 위해 새 VS Code 창과 폴더 선택 대화상자를 열었다. Windows 폴더 대화상자의 접근성 포커스가 검색창으로 잘못 고정된 상태에서 사용자가 Esc 키로 컴퓨터 제어를 다시 중단해 폴더 선택을 완료하지 못했다.
+- **변경 파일**: `docs/AGENT_WORKLOG.md`.
+- **커밋**: 미커밋.
+- **검증**: 기존 분석 프로젝트 창과 별도로 새 VS Code 창 및 `폴더 열기` 대화상자가 표시된 것까지 확인했다. `yongin-public-data-collector`가 열린 창 제목은 확인하지 못했다.
+- **다음 작업자에게**: 컴퓨터 제어가 다시 시작되면 폴더 대화상자 대신 VS Code 자체 최근 폴더/명령 팔레트 경로를 우선 시도하거나, 사용자가 직접 `C:\Users\aicam\Documents\ChatGPT\yongin-public-data-collector`를 선택하도록 안내할 것.
